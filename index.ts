@@ -103,6 +103,14 @@ io.on("connection", (socket: Socket) => {
     })
 
     // MOVEMENTS
+    socket.on("emitMode", data => {
+        const { ownerId, mode, weaponName} = data
+        let player = players.find(user => user.owner === ownerId)
+        if(!player) return
+        
+        player.mode = mode
+        io.emit("emitted-mode", data)
+    })
     socket.on("emitLoc", data => {
         const { ownerId, pos, dirTarg, mode, weaponName} = data
         let player = players.find(user => user.owner === ownerId)
