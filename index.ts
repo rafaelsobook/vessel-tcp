@@ -53,6 +53,12 @@ app.get("/", (req, res) => {
     res.status(200).send(players)
 })
 
+// public server status - no auth/socket connection needed, so the client
+// can show a live online count on the home page before login
+app.get("/status", (req, res) => {
+    res.status(200).json({ online: players.length })
+})
+
 const io = new Server(server, {
     cors: {
         origin: "*",
