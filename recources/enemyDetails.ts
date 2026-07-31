@@ -1,6 +1,6 @@
 import { randNumString } from "../tools/tools"
 import { simpleCoreLoot, mediumCoreLoot } from "./coreDetails"
-import { generateSlimes } from "../generate-datas/genenemy"
+import { generateSlimes, generateMonoliths, generateLesserDemons } from "../generate-datas/genenemy"
 
 let monolithBodyHeight = 2
 
@@ -43,7 +43,16 @@ const enemyInterface = {
 }
 
 export default [
-    ...generateSlimes(100),
+    // ...generateSlimes(20),
+    // openworld (placeId 888) - centered on infterrain's own SPAWN_X/SPAWN_Z (0, 500),
+    // not world origin, since that's where the actual playable terrain/player spawn is
+    // ...generateSlimes(10, 888, 300, "ring", 0, 500),
+    // ring surrounding the openworld cluster - scattered 100-150 units out from (0, 500)
+    ...generateSlimes(15, 888, 300, "ring", 0, 500, 100, 150),
+    // orangelith monoliths - further out than the slime ring, ~200 units from (0, 500)
+    ...generateMonoliths(5, 888, 300, "ring", 0, 500, 200, 260),
+    // single lesserdemon at the openworld center
+    ...generateLesserDemons(1, 888, 300, "fixed", -34, 70),
     {...enemyInterface,
         _id: `${randNumString()}`,
         maxDistance: 0.5,
