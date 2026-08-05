@@ -40,7 +40,16 @@ const enemyInterface = {
     }
 };
 exports.default = [
-    ...(0, genenemy_1.generateSlimes)(100),
+    // ...generateSlimes(20),
+    // openworld (placeId 888) - centered on infterrain's own SPAWN_X/SPAWN_Z (0, 500),
+    // not world origin, since that's where the actual playable terrain/player spawn is
+    // ...generateSlimes(10, 888, 300, "ring", 0, 500),
+    // ring surrounding the openworld cluster - scattered 100-150 units out from (0, 500)
+    ...(0, genenemy_1.generateSlimes)(15, 888, 300, "ring", 0, 500, 100, 150),
+    // orangelith monoliths - further out than the slime ring, ~200 units from (0, 500)
+    ...(0, genenemy_1.generateMonoliths)(5, 888, 300, "ring", 0, 500, 200, 260),
+    // single lesserdemon at the openworld center
+    ...(0, genenemy_1.generateLesserDemons)(1, 888, 300, "fixed", -34, 70),
     { ...enemyInterface,
         _id: `${(0, tools_1.randNumString)()}`,
         maxDistance: 0.5,

@@ -59,6 +59,11 @@ let treasures = [];
 app.get("/", (req, res) => {
     res.status(200).send(players);
 });
+// public server status - no auth/socket connection needed, so the client
+// can show a live online count on the home page before login
+app.get("/status", (req, res) => {
+    res.status(200).json({ online: players.length });
+});
 const io = new socket_io_1.Server(server, {
     cors: {
         origin: "*",
@@ -106,6 +111,14 @@ io.on("connection", (socket) => {
         io.emit("worldChatMessage", data);
     });
     // MOVEMENTS
+    socket.on("emitMode", data => {
+        const { ownerId, mode, weaponName } = data;
+        let player = players.find(user => user.owner === ownerId);
+        if (!player)
+            return;
+        player.mode = mode;
+        io.emit("emitted-mode", data);
+    });
     socket.on("emitLoc", data => {
         const { ownerId, pos, dirTarg, mode, weaponName } = data;
         let player = players.find(user => user.owner === ownerId);
@@ -321,6 +334,25 @@ io.on("connection", (socket) => {
             }
         });
         io.emit("enemy-attacked", data);
+    });
+    // openworld's terrain is uneven and enemyDetails/genenemy.ts only ever seed
+    // y:0 - clients periodically verify/correct an enemy's y against the real
+    // terrain height (see createEnemy.js) and report it here so tcpEnemies (and
+    // therefore anyone who joins/re-syncs later) reflects the corrected height,
+    // and everyone already connected gets it live via the broadcast below.
+    // socket.broadcast.emit (not io.emit) deliberately excludes the sender - the
+    // sender already applied this exact correction locally, synchronously, before
+    // emitting. Echoing it back via io.emit would round-trip a value computed for
+    // wherever the (possibly still-chasing) enemy WAS at emit time, arriving after
+    // the enemy has already moved on - a guaranteed "correct, then instantly wrong
+    // again" flicker on every single correction, not just an occasional race.
+    socket.on("correctEnemyY", data => {
+        const { _id, y } = data;
+        const enem = tcpEnemies.find(enem => enem._id === _id);
+        if (!enem)
+            return;
+        enem.y = y;
+        socket.broadcast.emit("enemy-y-corrected", data);
     });
     socket.on("enemyAttackedRange", data => {
         tcpEnemies.forEach(enem => {
