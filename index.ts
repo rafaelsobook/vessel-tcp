@@ -17,6 +17,20 @@ app.use(express.json())
 app.use(express.urlencoded({ extended: false }))
 app.use(cors({ origin: "*", methods: ["GET", "POST"] }))
 
+// Backstop for anything outside a socket handler's synchronous body - e.g. a
+// rejected fire-and-forget promise, or a bug inside a setTimeout callback
+// like the one in respawnEnemy below, which safeOn's try/catch can't see
+// since it runs after the handler that scheduled it has already returned.
+// Logging (rather than letting the process die and the host silently
+// restart it) keeps prod failures visible instead of showing up as an
+// unexplained blip in uptime.
+process.on("unhandledRejection", (reason) => {
+    console.error("[unhandledRejection]", reason)
+})
+process.on("uncaughtException", (error) => {
+    console.error("[uncaughtException]", error)
+})
+
 type Tplayers = {
     socketId: string
     owner: string,
@@ -68,8 +82,27 @@ const io = new Server(server, {
     }
 })
 
+// Unlike Express 5 (which auto-forwards a thrown/rejected async route handler
+// to its own error middleware instead of crashing), Socket.IO has no built-in
+// protection against a listener throwing - and every handler below reads
+// straight from a client-supplied payload (data.currentPlace.placeId,
+// data.dmgDetails.weaponDmg, etc.) with no validation. One malformed message
+// from any single connected player would otherwise take the whole server
+// down for everyone. This only guards the synchronous portion of a handler -
+// see the process-level uncaughtException/unhandledRejection handlers below
+// for the backstop covering deferred callbacks (e.g. respawnEnemy's setTimeout).
+function safeOn(socket: Socket, event: string, handler: (...args: any[]) => void) {
+    socket.on(event, (...args: any[]) => {
+        try {
+            handler(...args)
+        } catch (error) {
+            console.error(`[socket:${event}] handler threw:`, error)
+        }
+    })
+}
+
 io.on("connection", (socket: Socket) => {
-    socket.on("join-world", (data, callback) => {
+    safeOn(socket, "join-world", (data, callback) => {
         // join-world fires every time the client loads a new place, not just
         // on first connect (see areascene.js) - so an existing entry for this
         // owner only means another device is logged in if it's a different
@@ -103,7 +136,7 @@ io.on("connection", (socket: Socket) => {
     // access, so persistence happens client-side straight to the server's
     // own REST api (see server/routes/worldMessageR.js); this just fans the
     // message back out to everyone in realtime.
-    socket.on("worldChatMessage", data => {
+    safeOn(socket, "worldChatMessage", data => {
         const { playerId, message } = data
         if(!message || !message.trim()) return
         if(!players.find(uzr => uzr.owner === playerId)) return log(`no valid player ${playerId}`)
@@ -111,7 +144,7 @@ io.on("connection", (socket: Socket) => {
     })
 
     // MOVEMENTS
-    socket.on("emitMode", data => {
+    safeOn(socket, "emitMode", data => {
         const { ownerId, mode, weaponName} = data
         let player = players.find(user => user.owner === ownerId)
         if(!player) return
@@ -119,7 +152,7 @@ io.on("connection", (socket: Socket) => {
         player.mode = mode
         io.emit("emitted-mode", data)
     })
-    socket.on("emitLoc", data => {
+    safeOn(socket, "emitLoc", data => {
         const { ownerId, pos, dirTarg, mode, weaponName} = data
         let player = players.find(user => user.owner === ownerId)
         if(!player) return
@@ -133,7 +166,7 @@ io.on("connection", (socket: Socket) => {
         // log(`dirTarg: `, player.dirTarg)
         io.emit("emitted-loc", data)
     })
-    socket.on("emitmove", data => {
+    safeOn(socket, "emitmove", data => {
         const { ownerId, pos, dirTarg, mode} = data
         let player = players.find(user => user.owner === ownerId)
         if(!player) return
@@ -148,7 +181,7 @@ io.on("connection", (socket: Socket) => {
         // log(`dirTarg: `, player.dirTarg)
         io.emit("emitted-moving", data)
     })
-    socket.on("emitStop", data => {
+    safeOn(socket, "emitStop", data => {
         const { ownerId, pos, dirTarg, mode} = data
         let player = players.find(user => user.owner === ownerId)
         if(!player) return
@@ -164,7 +197,7 @@ io.on("connection", (socket: Socket) => {
         io.emit("stopped", data)
     })
     // Actions
-    socket.on("emitPlayerAttack", data => {
+    safeOn(socket, "emitPlayerAttack", data => {
         const {
             owner,
             pos,
@@ -194,7 +227,7 @@ io.on("connection", (socket: Socket) => {
         player.dirTarg = dirTarg
         io.emit("player-attacked", data)
     })
-    socket.on("activate-skill", data => {
+    safeOn(socket, "activate-skill", data => {
         const { ownerId, skill, currentPlaceId } = data
         switch(skill.name){
             case "flexaura":
@@ -212,12 +245,12 @@ io.on("connection", (socket: Socket) => {
     // MAGIC CIRCLES - purely visual sync, no server state to touch. Client is
     // responsible for filtering by placeId (and by ownerId, once emitSpawnCircle
     // sends one - see note in client/src/sockets/emits.js) before spawning.
-    socket.on("spawncirc", data => {
+    safeOn(socket, "spawncirc", data => {
         const { pos, placeId, element } = data
         io.emit("circle-spawned", { pos, placeId, element })
     })
     // EQUIPING
-    socket.on("emitEquipItem", data =>{
+    safeOn(socket, "emitEquipItem", data =>{
         const {ownerId, itemName, itemModelStyle,  itemType, currentPlaceId} = data
         const isValidPlayer = players.find(uzr => uzr.owner === ownerId)
         if(!isValidPlayer) return log(`no valid player ${ownerId}`)
@@ -225,7 +258,7 @@ io.on("connection", (socket: Socket) => {
         if(itemType === "weapon") isValidPlayer.hasWeapon = true
         io.emit('equiped-item', data)
     })
-    socket.on("emitUnEquip", data =>{
+    safeOn(socket, "emitUnEquip", data =>{
         const {ownerId, itemType, currentPlaceId} = data
         const player = players.find(uzr => uzr.owner === ownerId)
         if(!player) return log(`no valid player ${ownerId}`)
@@ -239,7 +272,7 @@ io.on("connection", (socket: Socket) => {
     })
 
     // QUESTS (guild board)
-    socket.on("emitClaimQuest", data => {
+    safeOn(socket, "emitClaimQuest", data => {
         const { ownerId, questId, currentPlaceId } = data
         const player = players.find(uzr => uzr.owner === ownerId)
         if(!player) return log(`no valid player ${ownerId}`)
@@ -254,7 +287,7 @@ io.on("connection", (socket: Socket) => {
         log(`${ownerId} claimed quest ${questId}`)
         io.emit("quest-claim-result", { ownerId, questId, currentPlaceId, success: true, quest: targetQuest })
     })
-    socket.on("emitCancelQuest", data => {
+    safeOn(socket, "emitCancelQuest", data => {
         const { ownerId, questId, currentPlaceId } = data
         const targetQuest = quests.find(q => q.questId === questId)
         if(!targetQuest) return log(`no valid quest ${questId}`)
@@ -267,7 +300,7 @@ io.on("connection", (socket: Socket) => {
     // the board's pool for good and, if that drops f-rank quests (like the
     // slime ones) below F_RANK_QUEST_COUNT, tops the pool back up so it never
     // drifts above or below that count
-    socket.on("emitCompleteQuest", data => {
+    safeOn(socket, "emitCompleteQuest", data => {
         const { ownerId, questId, currentPlaceId } = data
         const targetQuest = quests.find(q => q.questId === questId)
         if(!targetQuest) return log(`no valid quest ${questId}`)
@@ -286,7 +319,7 @@ io.on("connection", (socket: Socket) => {
     })
 
     //enemy related
-    socket.on("enemyIsHit", data => {
+    safeOn(socket, "enemyIsHit", data => {
         const { targetId, dmgDetails } = data
         // console.log(`${targetId} is hit with ${dmgDetails.weaponDmg ? dmgDetails.weaponDmg : dmgDetails.physicalDmg} damage`)
         // log(data.dmgDetails)
@@ -302,7 +335,7 @@ io.on("connection", (socket: Socket) => {
         console.log(`enemy hp ${enemyTarg.hp} / ${enemyTarg.maxHp}`)
         io.emit("enemy-is-hit", {...data, dmgToApply, hp: enemyTarg.hp, maxHp: enemyTarg.maxHp})
     })
-    socket.on('enemyChangeTarget', data => {
+    safeOn(socket, 'enemyChangeTarget', data => {
         tcpEnemies.forEach(enem => {
             if(data._id === enem._id){
                 enem._targetId = data.newTargetId
@@ -310,7 +343,7 @@ io.on("connection", (socket: Socket) => {
         })
         io.emit("enemy-changedtarget", data)
     })
-    socket.on("respawnEnemy", data => {
+    safeOn(socket, "respawnEnemy", data => {
         const {maxHp, name, respawnDetails} = data
         setTimeout(() => {
             tcpEnemies.push({...data,
@@ -324,13 +357,13 @@ io.on("connection", (socket: Socket) => {
             io.emit("enemy-respawned", tcpEnemies)
         }, respawnDetails.respawnTime)
     })
-    socket.on("removeEnemy", enemyId => {
+    safeOn(socket, "removeEnemy", enemyId => {
         tcpEnemies = tcpEnemies.filter(enemy => enemy._id !== enemyId)
         console.log("enemy removed ", enemyId)
         console.log("tcpEnemies ", tcpEnemies.length)
         io.emit("enemy-removed", enemyId)
     })
-    socket.on("enemyWillAttack", data => {
+    safeOn(socket, "enemyWillAttack", data => {
         const { pos } = data
         tcpEnemies.forEach(enem => {
             if(data._id === enem._id){
@@ -354,14 +387,14 @@ io.on("connection", (socket: Socket) => {
     // wherever the (possibly still-chasing) enemy WAS at emit time, arriving after
     // the enemy has already moved on - a guaranteed "correct, then instantly wrong
     // again" flicker on every single correction, not just an occasional race.
-    socket.on("correctEnemyY", data => {
+    safeOn(socket, "correctEnemyY", data => {
         const { _id, y } = data
         const enem = tcpEnemies.find(enem => enem._id === _id)
         if(!enem) return
         enem.y = y
         socket.broadcast.emit("enemy-y-corrected", data)
     })
-    socket.on("enemyAttackedRange", data => {
+    safeOn(socket, "enemyAttackedRange", data => {
         tcpEnemies.forEach(enem => {
             if(data._id === enem._id){
                 // enem._targetId = data.targetId
@@ -371,7 +404,7 @@ io.on("connection", (socket: Socket) => {
         })
         io.emit("enemy-attacked-range", data)
     })
-    socket.on("registerPlayerAsEnemy", data => {
+    safeOn(socket, "registerPlayerAsEnemy", data => {
         tcpEnemies.forEach(enem => {
             if(data._id === enem._id){
                 console.log("confirm enemy exist")
@@ -383,7 +416,7 @@ io.on("connection", (socket: Socket) => {
         })
         io.emit("registered-playerAsEnemy", tcpEnemies)
     })
-    socket.on("enemyWillChase", data => {
+    safeOn(socket, "enemyWillChase", data => {
         const { currentPlaceId, _id, targetId, actionType } = data
         tcpEnemies.forEach(enem => {
             
@@ -401,7 +434,7 @@ io.on("connection", (socket: Socket) => {
         io.emit("enemy-chasing", data)
     })
     // DISCONNECTIONS
-    socket.on('will-die', data => {
+    safeOn(socket, 'will-die', data => {
         const {ownerId, currentPlaceId} = data
         const theUzer = players.find(user => user.owner === ownerId)
         if(!theUzer) return log("uzer died id not found. line.147")
@@ -420,7 +453,7 @@ io.on("connection", (socket: Socket) => {
         }
         
     })
-    socket.on('dispose', data => {
+    safeOn(socket, 'dispose', data => {
         const { owner } = data
         console.log("dispose ", data)
         // I will use owner since owner is also a unique string ID from login info
@@ -430,7 +463,7 @@ io.on("connection", (socket: Socket) => {
         removeCharacter(thePlayer.owner, thePlayer.name, thePlayer.currentPlace.placeId)
         
     })
-    socket.on("disconnect", () => {
+    safeOn(socket, "disconnect", () => {
         const thePlayer = players.find(player => player.socketId === socket.id)        
         if(thePlayer) {            
             removeCharacter(thePlayer.owner, thePlayer.name, thePlayer.currentPlace.placeId)
