@@ -29,6 +29,8 @@ type Tplayers = {
     clothColor: string,
     pantsColor: string,
     hairColor: string,
+    skinColor: string, // was already sent by getCharSocket() but missing from this type
+    race: string,
     currentPlace: any, // placeId, name, areaType
     _moving: boolean,
     _minning: boolean,
