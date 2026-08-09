@@ -64,6 +64,12 @@ let tcpEnemies = enemyArray
 let quests = startingQuests
 let treasures: unknown[] = []
 
+// enemy._id -> a per-bind counter, only used by the enemyBind handler below
+// (skill.enemyBind) - lets a second bind landing on an already-bound enemy
+// supersede the first one's timer instead of racing it: only the MOST
+// RECENT bind's own setTimeout is allowed to actually clear _disabled
+const enemyBindTokens = new Map<string, number>()
+
 
 app.get("/", (req, res) => {
     res.status(200).send(players)
@@ -335,6 +341,57 @@ io.on("connection", (socket: Socket) => {
         console.log(`enemy hp ${enemyTarg.hp} / ${enemyTarg.maxHp}`)
         io.emit("enemy-is-hit", {...data, dmgToApply, hp: enemyTarg.hp, maxHp: enemyTarg.maxHp})
     })
+    // skill.enemyBind (see client's skillsData.js radiantjudgmentSkill and
+    // skillEffects.js's hit handler) - bindChance was already rolled
+    // client-side before this ever fires (this server never sees a miss,
+    // same as every other hit-resolution decision in this game - see
+    // enemyIsHit above). This server IS the authority for the disabled
+    // window itself though: sets _disabled here and is the only thing that
+    // flips it back off, via the timer below, rather than trusting any
+    // client to report "time's up" (a client could lag, disconnect, or lie).
+    safeOn(socket, "enemyBind", data => {
+        const { targetId, shape, bindDuration, currentPlaceId } = data
+        const enemyTarg = tcpEnemies.find(ene => ene._id === targetId)
+        if(!enemyTarg) return log("not found enemy to bind ", targetId)
+
+        enemyTarg._disabled = true
+        io.emit("enemy-bound", { targetId, shape, bindDuration, currentPlaceId })
+
+        // a second bind landing before this one's timer expires shouldn't
+        // let THIS timer clear _disabled early once ITS shorter/earlier
+        // duration runs out - only the most recent bind's own timer is
+        // allowed to actually turn it back off (see enemyBindTokens above)
+        const myToken = (enemyBindTokens.get(targetId) ?? 0) + 1
+        enemyBindTokens.set(targetId, myToken)
+
+        setTimeout(() => {
+            if(enemyBindTokens.get(targetId) !== myToken) return // a newer bind has since taken over
+            enemyBindTokens.delete(targetId)
+            // may have died (and been filtered out of tcpEnemies) by now -
+            // either way still broadcast enemy-unbound so every client's
+            // local bind visual/timer gets cleaned up
+            const stillBound = tcpEnemies.find(ene => ene._id === targetId)
+            if(stillBound) stillBound._disabled = false
+            io.emit("enemy-unbound", { targetId, currentPlaceId })
+        }, bindDuration * 1000)
+    })
+    // dark magic's curse (see client's skillsData.js header comment,
+    // skillEffects.js's hit handler - every dark-element skill's hit curses
+    // its target, no chance roll unlike enemyBind above). Permanent for the
+    // rest of the enemy's life - unlike _disabled there's no timer/un-curse
+    // here, it only ever clears by the enemy dying (removed from tcpEnemies
+    // entirely, and a respawn starts fresh with _cursed: false). The actual
+    // damage-reflection this causes lives entirely client-side (worldsocket.js's
+    // "enemy-attacked" handler) - this server only owns the persistent flag.
+    safeOn(socket, "enemyCurse", data => {
+        const { targetId, currentPlaceId } = data
+        const enemyTarg = tcpEnemies.find(ene => ene._id === targetId)
+        if(!enemyTarg) return log("not found enemy to curse ", targetId)
+        if(enemyTarg._cursed) return // already cursed, nothing new to broadcast
+
+        enemyTarg._cursed = true
+        io.emit("enemy-cursed", { targetId, currentPlaceId })
+    })
     safeOn(socket, 'enemyChangeTarget', data => {
         tcpEnemies.forEach(enem => {
             if(data._id === enem._id){
@@ -353,6 +410,8 @@ io.on("connection", (socket: Socket) => {
                 _targetId: undefined,
                 _dirTarg: {x:0,z:0},
                 _attacking: false,
+                _disabled: false,
+                _cursed: false,
             })
             io.emit("enemy-respawned", tcpEnemies)
         }, respawnDetails.respawnTime)
@@ -393,6 +452,25 @@ io.on("connection", (socket: Socket) => {
         if(!enem) return
         enem.y = y
         socket.broadcast.emit("enemy-y-corrected", data)
+    })
+    // enemy skill-casting (client/src/creations/skillEffects.js's
+    // castEnemySkill/fireEnemySkillProjectile) - same plain relay pattern
+    // as enemyWillAttack above: this server does no validation of its own,
+    // it just stamps the enemy's current target/position and rebroadcasts
+    // to everyone (including the sender). Every client decides for itself
+    // whether it's the actual target and only applies damage then - see
+    // that function's own comment for why that's safe even though this
+    // relay trusts whichever single client emitted it.
+    safeOn(socket, "enemyWillCastSkill", data => {
+        const { pos } = data
+        tcpEnemies.forEach(enem => {
+            if(data._id === enem._id){
+                enem._targetId = data.targetId
+                enem.x = pos.x
+                enem.z = pos.z
+            }
+        })
+        io.emit("enemy-cast-skill", data)
     })
     safeOn(socket, "enemyAttackedRange", data => {
         tcpEnemies.forEach(enem => {
@@ -464,10 +542,30 @@ io.on("connection", (socket: Socket) => {
         
     })
     safeOn(socket, "disconnect", () => {
-        const thePlayer = players.find(player => player.socketId === socket.id)        
-        if(thePlayer) {            
+        const thePlayer = players.find(player => player.socketId === socket.id)
+        if(thePlayer) {
             removeCharacter(thePlayer.owner, thePlayer.name, thePlayer.currentPlace.placeId)
         }
+    })
+
+    // enemy dodge (client/src/enemies/createEnemy.js's own 2s projectile-
+    // threat check, det.canDodge - fireslime/electricslime/orangelith for
+    // now) - any client watching a given enemy can independently decide it
+    // should dodge (every projectile is a client-local render, not a
+    // shared network entity, so there's no single "authoritative" client
+    // to restrict this to the way enemyWillCastSkill restricts to the
+    // closest player). Multiple clients can plausibly emit this for the
+    // same enemy within the same moment since they're all watching
+    // roughly the same threat - _dodgeCooldownUntil collapses those into
+    // a single broadcast instead of relaying every duplicate.
+    safeOn(socket, "enemyWillDodge", data => {
+        const enem = tcpEnemies.find(e => e._id === data._id)
+        if(!enem) return
+        if(enem._disabled) return
+        const now = Date.now()
+        if(enem._dodgeCooldownUntil && now < enem._dodgeCooldownUntil) return
+        enem._dodgeCooldownUntil = now + DODGE_COOLDOWN_MS
+        io.emit("enemy-dodge", data)
     })
 
     // setInterval(() => {
@@ -476,6 +574,44 @@ io.on("connection", (socket: Socket) => {
         // console.log("tcpEnemies ", tcpEnemies.length)
     // }, 1000)
 })
+
+// enemy wander ("scouting" - makes idle enemies walk to a nearby open spot
+// on their own instead of standing frozen at their spawn point). Module-
+// level, NOT inside io.on("connection", ...) above - this must run once
+// total, not once per connected client (an interval placed inside the
+// connection handler would duplicate itself for every player currently
+// online, each one independently re-broadcasting the same wander ticks).
+// Every enemy in tcpEnemies is eligible - fireslime/electricslime/
+// orangelith aren't special-cased here, only dodging is skill/enemy-
+// specific (see enemyWillDodge above and createEnemy.js's own det.canDodge
+// gate).
+const WANDER_INTERVAL_MS = 5000
+const WANDER_RADIUS = 8
+const WANDER_CHANCE = 0.35
+const DODGE_COOLDOWN_MS = 3000
+setInterval(() => {
+    tcpEnemies.forEach(enem => {
+        // busy fighting/chasing a player, or bound (skill.enemyBind) -
+        // leave it alone, don't interrupt with a wander order
+        if(enem._targetId) return
+        if(enem._disabled) return
+        if(Math.random() > WANDER_CHANCE) return
+
+        // origPos (enemyInterface/generateEnemies - every enemy has one)
+        // is the enemy's own spawn point, not wherever it currently is -
+        // wandering stays anchored to its own territory instead of
+        // drifting further and further from where it was placed over
+        // successive wander ticks
+        const origin = enem.origPos ?? { x: enem.x, z: enem.z }
+        const angle = Math.random() * Math.PI * 2
+        const radius = Math.random() * WANDER_RADIUS
+        const destX = origin.x + Math.cos(angle) * radius
+        const destZ = origin.z + Math.sin(angle) * radius
+
+        io.emit("enemy-wander", { _id: enem._id, currentPlaceId: enem.currentPlaceId, x: destX, z: destZ })
+    })
+}, WANDER_INTERVAL_MS)
+
 function removeCharacter(ownerId: string, playerName: string, placeId: number){
     log(playerName , " disconnecting ... ")    
     players = players.filter(plyr => plyr.owner !== ownerId)

@@ -1,5 +1,5 @@
 import { randNumString } from "../tools/tools"
-import { simpleCoreLoot } from "../recources/coreDetails"
+import { simpleCoreLoot, waterslimeCoreLoot, fireslimeCoreLoot, electricslimeCoreLoot } from "../recources/coreDetails"
 
 const slimeBase = {
     maxDistance: 0.5,
@@ -10,14 +10,14 @@ const slimeBase = {
     stats: {
         dmg: 5,
         magDmg: 1,
-        spd: 5.3,
+        spd: 2.5,
         atkSpd: 2,
         accuracy: 1,
         critical: 1.4,
     },
     lvl: 1,
-    hp: 580,
-    maxHp: 580,
+    hp: 2580,
+    maxHp: 2580,
     expToGain: 100,
     bodyHeight: 1,
     bodyWidenes: 0.9,
@@ -42,18 +42,68 @@ const slimeBase = {
     _dirTarg: { x: 0, y: 0, z: 0 },
     _attacking: false,
     _canAttack: true,
-    loots: [simpleCoreLoot],
+    _disabled: false, // skill.enemyBind - see index.ts's enemyBind handler
+    _cursed: false, // dark magic's curse - see index.ts's enemyCurse handler
+    loots: [waterslimeCoreLoot],
     respawnDetails: {
         willRespawn: true,
         respawnTime: 15 * 1000,
     },
 }
 
+// fire/electric variants of slimeBase - same body/stats template, just the
+// element/loot/skill swapped in, same pattern enemyDetails.ts's own
+// standalone fireslime/electricslime entries (village, placeId 1) already
+// use: skills: [elementSkill] (createEnemy.js's enemy skill-casting
+// interval resolves this name to the real skill object client-side via
+// SKILLS_BY_NAME) and canDodge: true (createEnemy.js's own dodge-detection
+// interval). Both still spread via generateEnemies/scatterPosition exactly
+// like generateSlimes does - only the base template differs.
+const fireSlimeBase = {
+    ...slimeBase,
+    name: "fireslime",
+    dn: "Fire Slime",
+    elementType: "fire",
+    titles: ['fire slime'],
+    aptitude: ['fire'],
+    skills: ['flamebrand'],
+    canDodge: true,
+    loots: [fireslimeCoreLoot],
+}
+
+const electricSlimeBase = {
+    ...slimeBase,
+    name: "electricslime",
+    dn: "Electric Slime",
+    // "lightning" not "electric" - matches the game's own established
+    // element vocabulary, same reasoning as enemyDetails.ts's own
+    // standalone electricslime entry
+    elementType: "lightning",
+    titles: ['electric slime'],
+    aptitude: ['lightning'],
+    skills: ['lightningbolt'],
+    canDodge: true,
+    loots: [electricslimeCoreLoot],
+}
+
 const monolithBase = {
-    maxDistance: 4.5,
+    // was 4.5 - way past melee reach (renderer.js's chase loop stops
+    // advancing once dist < maxDistance, and createEnemy.js's attack()
+    // uses the same field for its own range check), so it stopped and
+    // "attacked" from 4.5 units out with nothing ever visually connecting.
+    // rangeAtkDetails below (range: 15) suggests 4.5 was actually tuned for
+    // a ranged sting attack, but the code that would use rangeAtkDetails is
+    // commented out in createEnemy.js and actionType here is "chasing" not
+    // "dynamic"/"throwing" - it never fires, so this was silently running
+    // melee-only this whole time. 0.7 is a real melee reach, roughly
+    // matching slimeBase's own maxDistance-to-bodyWidenes ratio (0.5/0.9)
+    // with a little extra for this enemy's taller frame (bodyHeight 2).
+    maxDistance: 0.7,
     name: "orangelith",
     dn: "Orange Lith",
     modelStyle: "monolith",
+    // see client/src/enemies/createEnemy.js's own dodge-detection interval
+    canDodge: true,
     stats: {
         dmg: 2,
         magDmg: 1,
@@ -90,6 +140,8 @@ const monolithBase = {
     _dirTarg: { x: 0, y: 0, z: 0 },
     _attacking: false,
     _canAttack: true,
+    _disabled: false, // skill.enemyBind - see index.ts's enemyBind handler
+    _cursed: false, // dark magic's curse - see index.ts's enemyCurse handler
     loots: [simpleCoreLoot],
     respawnDetails: {
         willRespawn: true,
@@ -98,7 +150,12 @@ const monolithBase = {
 }
 
 const lesserDemonBase = {
-    maxDistance: 7.5,
+    // was 7.5, same "stops and swings from way too far away" issue as
+    // monolithBase above - this one has no rangeAtkDetails at all backing
+    // it, just an oversized value. 1.0 is a real melee reach, scaled up
+    // from slimeBase's own maxDistance-to-bodyWidenes ratio (0.5/0.9) for
+    // this enemy's much larger frame (bodyWidenes 1.5, bodyHeight 3.5).
+    maxDistance: 1.0,
     name: "lesserdemon",
     dn: "Demon",
     modelStyle: "lesserdemon",
@@ -139,6 +196,8 @@ const lesserDemonBase = {
     _dirTarg: { x: 0, y: 0, z: 0 },
     _attacking: false,
     _canAttack: true,
+    _disabled: false, // skill.enemyBind - see index.ts's enemyBind handler
+    _cursed: false, // dark magic's curse - see index.ts's enemyCurse handler
     loots: [simpleCoreLoot],
     respawnDetails: {
         willRespawn: true,
@@ -225,6 +284,14 @@ function generateEnemies(base: object, total: number, placeId: number, areaSize:
 
 export function generateSlimes(total = 10, placeId = 1, areaSize = 300, areaType = "village", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
     return generateEnemies(slimeBase, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius)
+}
+
+export function generateFireSlimes(total = 10, placeId = 1, areaSize = 300, areaType = "village", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
+    return generateEnemies(fireSlimeBase, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius)
+}
+
+export function generateElectricSlimes(total = 10, placeId = 1, areaSize = 300, areaType = "village", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
+    return generateEnemies(electricSlimeBase, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius)
 }
 
 export function generateMonoliths(total = 5, placeId = 1, areaSize = 300, areaType = "village", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {

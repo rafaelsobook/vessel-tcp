@@ -18,6 +18,60 @@ export const simpleCoreLoot = {
     rarity: "normal"
 }
 
+export const waterslimeCoreLoot = {
+    itemId: randNumString(),
+    name: "waterslimecore",
+    dn: "water slime core",
+    itemCateg: "crafting",
+    itemType: "core",
+    weaponType: false,
+    equipAbilities: {
+        dmg: 10, def: 10, magicDmg: 10, plusStr: 0, plusDex: 0, plusInt: 0,
+        plusDurability: 30
+    },
+    equiped: false,
+    price: { coinType: "bronze", pieces: 50 },
+    qnty: 1,
+    desc: "a gelatinous core taken from a water slime, useful for enhancing items",
+    rarity: "normal"
+}
+
+export const fireslimeCoreLoot = {
+    itemId: randNumString(),
+    name: "fireslimecore",
+    dn: "fire slime core",
+    itemCateg: "crafting",
+    itemType: "core",
+    weaponType: false,
+    equipAbilities: {
+        dmg: 10, def: 10, magicDmg: 10, plusStr: 0, plusDex: 0, plusInt: 0,
+        plusDurability: 30
+    },
+    equiped: false,
+    price: { coinType: "bronze", pieces: 50 },
+    qnty: 1,
+    desc: "a smoldering core taken from a fire slime, useful for enhancing items",
+    rarity: "normal"
+}
+
+export const electricslimeCoreLoot = {
+    itemId: randNumString(),
+    name: "electricslimecore",
+    dn: "electric slime core",
+    itemCateg: "crafting",
+    itemType: "core",
+    weaponType: false,
+    equipAbilities: {
+        dmg: 10, def: 10, magicDmg: 10, plusStr: 0, plusDex: 0, plusInt: 0,
+        plusDurability: 30
+    },
+    equiped: false,
+    price: { coinType: "bronze", pieces: 50 },
+    qnty: 1,
+    desc: "a crackling core taken from an electric slime, useful for enhancing items",
+    rarity: "normal"
+}
+
 export const mediumCoreLoot = {
     itemId: randNumString(),
     name: "mediumcore",
