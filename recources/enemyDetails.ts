@@ -4,6 +4,24 @@ import { generateSlimes, generateFireSlimes, generateElectricSlimes, generateMon
 
 let monolithBodyHeight = 2
 
+// openworld (placeId 888) slime territory - every water/fire/electric slime
+// placed there (both the static ones below AND any index.ts spawns
+// dynamically on top of them, see its own SLIME_SPAWN_* interval) carries
+// this same object on .territory, a shared reference rather than a fresh
+// copy per enemy. Centered on infterrain's own SPAWN_X/SPAWN_Z (0, 500) -
+// same center every ring/band below is already scattered around - covering
+// the combined range every slime type's own band sits within (waterslime
+// 100-150, fireslime 300-600, electricslime 600-1000).
+export const OPENWORLD_SLIME_TERRITORY = { center: { x: 0, y: 0, z: 500 }, minDist: 0, maxDist: 1000 }
+// applies OPENWORLD_SLIME_TERRITORY to every enemy a generator call
+// produced - .map() instead of baking .territory into the shared
+// slimeBase/fireSlimeBase/electricSlimeBase templates themselves
+// (genenemy.ts), since those generators are generic/reusable for any
+// future placeId, not just this openworld population
+function withTerritory(enemies: any[]) {
+    return enemies.map(enem => ({ ...enem, territory: OPENWORLD_SLIME_TERRITORY }))
+}
+
 const enemyInterface = {
     currentPlaceId: 1,
     _id: `${randNumString()}`,
@@ -50,7 +68,7 @@ export default [
     // not world origin, since that's where the actual playable terrain/player spawn is
     // ...generateSlimes(10, 888, 300, "ring", 0, 500),
     // ring surrounding the openworld cluster - scattered 100-150 units out from (0, 500)
-    ...generateSlimes(15, 888, 300, "ring", 0, 500, 100, 150),
+    ...withTerritory(generateSlimes(15, 888, 300, "ring", 0, 500, 100, 150)),
     // fireslime/electricslime openworld population, banded rings around the
     // same (0, 500) center (infterrain's own SPAWN_X/SPAWN_Z, also the
     // player's own openworld spawn point) - fireslime 300-600 units out,
@@ -67,12 +85,15 @@ export default [
     // is a live example of reading that same distance. areaSize (unused by
     // "ring" scatter, only minRadius/maxRadius matter for it) passed just
     // for readability, roughly 2x each band's own maxRadius.
-    // 500 total for now (250/250 split) - see client/src/sockets/renderer.js's
-    // own OPENWORLD_PLACE_ID distance-based mesh hiding (200 units), added
-    // alongside this so this many enemies at once doesn't tank fps for
-    // whichever client is currently in this place.
-    ...generateFireSlimes(250, 888, 1200, "ring", 0, 500, 300, 600),
-    ...generateElectricSlimes(250, 888, 2000, "ring", 0, 500, 600, 1000),
+    // 50 each (down from an initial 250/250) - static population is
+    // deliberately sparse now, index.ts's own SLIME_SPAWN_* interval tops
+    // territory up dynamically near whichever players are actually out
+    // there instead of pre-building the whole area upfront. See
+    // client/src/sockets/renderer.js's own OPENWORLD_PLACE_ID distance-based
+    // mesh hiding (200 units) for how the client keeps this affordable to
+    // render regardless of how many end up alive at once.
+    ...withTerritory(generateFireSlimes(50, 888, 1200, "ring", 0, 500, 300, 600)),
+    ...withTerritory(generateElectricSlimes(50, 888, 2000, "ring", 0, 500, 600, 1000)),
     // orangelith monoliths - further out than the slime ring, ~200 units from (0, 500)
     ...generateMonoliths(5, 888, 300, "ring", 0, 500, 200, 260),
     // single lesserdemon at the openworld center

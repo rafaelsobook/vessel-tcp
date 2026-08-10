@@ -5,8 +5,9 @@ import { Server, Socket } from "socket.io"
 import { randNumString, randNum } from "./tools/tools"
 
 import { placesMD } from "./placedetails/places"
-import enemyArray from "./recources/enemyDetails"
+import enemyArray, { OPENWORLD_SLIME_TERRITORY } from "./recources/enemyDetails"
 import startingQuests, { createSlaySlimesQuest, F_RANK_QUEST_COUNT } from "./recources/quests"
+import { generateSlimes, generateFireSlimes, generateElectricSlimes } from "./generate-datas/genenemy"
 
 const app = express()
 const server = http.createServer(app)
@@ -251,9 +252,16 @@ io.on("connection", (socket: Socket) => {
     // MAGIC CIRCLES - purely visual sync, no server state to touch. Client is
     // responsible for filtering by placeId (and by ownerId, once emitSpawnCircle
     // sends one - see note in client/src/sockets/emits.js) before spawning.
+    // socket.broadcast.emit (not io.emit) - every existing caller (the
+    // shrine circle in localroomdb.js, createEnemy.js's own lesserdemon
+    // teleport telegraph) already spawns its OWN circle locally before/
+    // alongside emitting this, same "I already applied it locally, this is
+    // just for everyone else watching" reasoning correctEnemyY's own
+    // handler below already uses - io.emit would echo it right back to the
+    // sender too, rendering a second overlapping circle on their own screen.
     safeOn(socket, "spawncirc", data => {
         const { pos, placeId, element } = data
-        io.emit("circle-spawned", { pos, placeId, element })
+        socket.broadcast.emit("circle-spawned", { pos, placeId, element })
     })
     // EQUIPING
     safeOn(socket, "emitEquipItem", data =>{
@@ -402,6 +410,7 @@ io.on("connection", (socket: Socket) => {
     })
     safeOn(socket, "respawnEnemy", data => {
         const {maxHp, name, respawnDetails} = data
+        if(respawnDetails.willRespawn === false) return
         setTimeout(() => {
             tcpEnemies.push({...data,
                 _id: randNumString(),
@@ -567,6 +576,24 @@ io.on("connection", (socket: Socket) => {
         enem._dodgeCooldownUntil = now + DODGE_COOLDOWN_MS
         io.emit("enemy-dodge", data)
     })
+    // lesserdemon's own "teleport in near you instead of chasing" (see
+    // genenemy.ts's lesserDemonBase, actionType "teleporting", and
+    // createEnemy.js's own teleport interval) - same relay-and-stamp
+    // pattern enemyWillAttack below already uses (x/z updated here too, so
+    // tcpEnemies - and therefore anyone who joins/re-syncs after this -
+    // reflects where it actually landed, not just live clients watching the
+    // broadcast). io.emit (not socket.broadcast.emit) - unlike spawncirc
+    // above, the deciding client does NOT apply this locally first; it only
+    // ever moves once the broadcast round-trips back, same as every other
+    // enemy position update in this game.
+    safeOn(socket, "enemyWillTeleport", data => {
+        const { _id, x, z } = data
+        const enem = tcpEnemies.find(e => e._id === _id)
+        if(!enem) return
+        enem.x = x
+        enem.z = z
+        io.emit("enemy-teleported", data)
+    })
 
     // setInterval(() => {
 
@@ -611,6 +638,71 @@ setInterval(() => {
         io.emit("enemy-wander", { _id: enem._id, currentPlaceId: enem.currentPlaceId, x: destX, z: destZ })
     })
 }, WANDER_INTERVAL_MS)
+
+// dynamic slime spawning (openworld, placeId 888) - tops territory back up
+// near whichever players actually wander into an empty pocket of it,
+// instead of pre-building the whole 0-1000-unit OPENWORLD_SLIME_TERRITORY
+// upfront (see enemyDetails.ts's own much sparser 50/50 fireslime/
+// electricslime counts now, down from an initial 250/250). Module-level,
+// same reasoning as the wander interval above it - runs once total, not
+// once per connection.
+const SLIME_SPAWN_CHECK_INTERVAL_MS = 2000
+// how far from the player the new slime actually lands - never right on
+// top of them, same "ring" scatter (random angle, min/max radius) every
+// other spawn in this game already uses
+const SLIME_SPAWN_DIST_MIN = 15
+const SLIME_SPAWN_DIST_MAX = 25
+// "no enemy near me (20-30 distance)" - was 25, exactly equal to
+// SLIME_SPAWN_DIST_MAX above, i.e. zero safety margin: a slime that
+// happened to land right near the far edge of its own spawn band (up to
+// 25 out) sat exactly on the "still counts as covered" boundary, so any
+// player movement at all before the NEXT check (every
+// SLIME_SPAWN_CHECK_INTERVAL_MS, now 1s) could push it back outside 25 and
+// re-trigger another spawn - repeatedly, since each freshly-spawned slime
+// has the same chance of landing near ITS OWN edge too. This was the
+// actual cause of slimes piling up into visible stacks: not a single
+// runaway loop, but this same near-miss happening again every second.
+// Comfortably larger than SLIME_SPAWN_DIST_MAX now (not equal to it) so
+// anything this interval just spawned reliably still reads as "covered"
+// on the very next check even after a second of player movement.
+const SLIME_SPAWN_NEARBY_RADIUS = 40
+// waterslime/fireslime/electricslime, one random pick per qualifying
+// player per tick - "aslong as I am in there territory" was given as a
+// single shared gate (OPENWORLD_SLIME_TERRITORY) covering all three types
+// together, not a separate per-type sub-range check
+const SLIME_SPAWN_GENERATORS = [generateFireSlimes, generateElectricSlimes, generateSlimes]
+setInterval(() => {
+    players.forEach(player => {
+        if(player.currentPlace?.placeId !== 888) return
+        if(!player.pos) return
+
+        const { center, minDist, maxDist } = OPENWORLD_SLIME_TERRITORY
+        const distFromCenter = Math.hypot(player.pos.x - center.x, player.pos.z - center.z)
+        if(distFromCenter < minDist || distFromCenter > maxDist) return
+
+        // self-throttling by construction - once a spawned slime is close
+        // enough to count as "nearby" (including the one just spawned a
+        // moment ago, synchronously already in tcpEnemies by the next
+        // tick), this stops firing for this player on its own, no extra
+        // per-player cooldown bookkeeping needed
+        const hasNearbyEnemy = tcpEnemies.some(enem =>
+            enem.currentPlaceId === 888 &&
+            Math.hypot(enem.x - player.pos.x, enem.z - player.pos.z) <= SLIME_SPAWN_NEARBY_RADIUS
+        )
+        if(hasNearbyEnemy) return
+
+        const generator = SLIME_SPAWN_GENERATORS[Math.floor(Math.random() * SLIME_SPAWN_GENERATORS.length)]
+        const [newSlime] = generator(1, 888, 100, "ring", player.pos.x, player.pos.z, SLIME_SPAWN_DIST_MIN, SLIME_SPAWN_DIST_MAX)
+        ;(newSlime as any).territory = OPENWORLD_SLIME_TERRITORY
+        newSlime._id = randNumString()
+        newSlime.respawnDetails = {
+            willRespawn: false,
+            respawnTime: 100,
+        }
+        tcpEnemies.push(newSlime as any)
+        io.emit("enemy-spawned", tcpEnemies)
+    })
+}, SLIME_SPAWN_CHECK_INTERVAL_MS)
 
 function removeCharacter(ownerId: string, playerName: string, placeId: number){
     log(playerName , " disconnecting ... ")    

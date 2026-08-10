@@ -127,7 +127,12 @@ const monolithBase = {
     ],
     effectsWhenHit: [],
     titles: ['stinger'],
-    skills: [],
+    // stoneshard (skillsData.js - earth, projectileStyle "blade", same
+    // safe-for-enemies style flamebrand/lightningbolt already use) -
+    // resolved client-side via SKILLS_BY_NAME, same generic det.skills-
+    // driven casting interval fireslime/electricslime already use
+    // (createEnemy.js)
+    skills: ['stoneshard'],
     aptitude: ['poison'],
     blessings: [],
     status: [],
@@ -182,15 +187,29 @@ const lesserDemonBase = {
         { effectType: 'spdrain', chance: 10, permanent: false, dn: 'SP Drained', spcost: 20, hpcost: 0, mpcost: 0, hungercost: 4, energycost: 0 },
     ],
     titles: [],
-    skills: [],
-    aptitude: [],
+    // shadowbolt (skillsData.js - dark, projectileStyle "bolt", a particle
+    // trail with no mesh/material for fireEnemySkillProjectile's own cached
+    // InstancedMesh box to fight - see that function's own comment on why
+    // "lightning"/"halo" specifically would silently fail there) - resolved
+    // client-side via SKILLS_BY_NAME, same generic det.skills-driven
+    // casting interval every other skill-casting enemy already uses
+    skills: ['shadowbolt'],
+    aptitude: ['dark'],
     blessings: [],
     status: [],
     regens: { sp: 1, hp: 1, mana: 1 },
     monsSoul: 2,
     race: "monster",
     characterType: "enemy",
-    actionType: "chasing",
+    // "teleporting" not "chasing" - this enemy never walks toward its
+    // target at all (renderer.js's own movement loop only actually
+    // translates an enemy forward when det.actionType === "chasing", a
+    // guard added specifically for this). Instead it teleports in near
+    // whoever it's decided to approach (client/src/enemies/createEnemy.js's
+    // own lesserdemon-only teleport interval: telegraphs with a magic
+    // circle, teleports a beat later close enough to melee) rather than
+    // covering the distance on foot.
+    actionType: "teleporting",
     _isMoving: false,
     _targetId: false as string | false,
     _dirTarg: { x: 0, y: 0, z: 0 },
