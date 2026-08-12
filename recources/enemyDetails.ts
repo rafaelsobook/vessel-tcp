@@ -28,7 +28,13 @@ const enemyInterface = {
 
     encounterSound: false,
 
-    expToGain: 100,
+    // TEMP DEBUG - bumped way up from 100 so a single kill (village
+    // waterslime/fireslime/electricslime, all built from this same
+    // enemyInterface) is guaranteed to trigger a level-up regardless of
+    // current character level, to make reproducing the "other player also
+    // gets exp" multiplayer bug fast to trigger over and over. Revert to
+    // 100 once done debugging.
+    expToGain: 999999,
     bodyHeight: 1.8,
     bodyWidenes: .9,
     origPos: { x: 3.6, y: 0, z: 130 },

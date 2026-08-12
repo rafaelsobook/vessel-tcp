@@ -18,7 +18,13 @@ const slimeBase = {
     lvl: 1,
     hp: 2580,
     maxHp: 2580,
-    expToGain: 100,
+    // TEMP DEBUG - bumped way up from 100 so a single kill (openworld
+    // water/fire/electric slimes, all built from this same slimeBase) is
+    // guaranteed to trigger a level-up regardless of current character
+    // level, to make reproducing the "other player also gets exp"
+    // multiplayer bug fast to trigger over and over. Revert to 100 once
+    // done debugging.
+    expToGain: 999999,
     bodyHeight: 1,
     bodyWidenes: 0.9,
     effects: [

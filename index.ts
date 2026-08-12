@@ -339,7 +339,24 @@ io.on("connection", (socket: Socket) => {
         // log(data.dmgDetails)
 
         const enemyTarg = tcpEnemies.find(ene => ene._id === targetId)
-        if(!enemyTarg) return log("not found enemy to be damaged ", targetId)
+        if(!enemyTarg){
+            // same shape "removeEnemy"'s own handler already broadcasts
+            // (io.emit("enemy-removed", enemyId) - a plain string) - this
+            // was an object instead ({targetId, currentPlaceId}), but the
+            // client's own "enemy-removed" listener always treats its
+            // payload as the bare id string (enmy._id === enemyId, and
+            // `enemy.${enemyId}` for the mesh-name lookup). An object
+            // compared with === against a string is always false, and
+            // interpolated into a template literal it stringifies to the
+            // literal text "enemy.[object Object]", which can never match
+            // any real mesh name - so this self-healing fallback (tell the
+            // client to clean up a ghost it's still holding onto, the
+            // moment the server confirms it doesn't actually exist) was
+            // silently never doing anything. Fixed by matching the one
+            // shape that already works everywhere else.
+            io.emit("enemy-removed", targetId)
+            return log("not found enemy to be damaged, told the client to clean up its own ghost - ", targetId)
+        }
         // if(!data.isMissed){
         // enemyTarg.hp -= data.hasWeapon ? data.dmgDetails.weaponDmg : data.dmgDetails.physicalDmg
         const dmgToApply = data.dmgDetails.weaponDmg ? data.dmgDetails.weaponDmg : data.dmgDetails.physicalDmg
@@ -411,9 +428,9 @@ io.on("connection", (socket: Socket) => {
     safeOn(socket, "respawnEnemy", data => {
         const {maxHp, name, respawnDetails} = data
         if(respawnDetails.willRespawn === false) return
+        data._id = randNumString()
         setTimeout(() => {
             tcpEnemies.push({...data,
-                _id: randNumString(),
                 hp: maxHp,
                 _isMoving: false,
                 _targetId: undefined,
@@ -433,6 +450,11 @@ io.on("connection", (socket: Socket) => {
     })
     safeOn(socket, "enemyWillAttack", data => {
         const { pos } = data
+        const exist = tcpEnemies.find(enem => enem._id === data._id)
+        if(!exist) {
+            console.log("enemyWillAttack not found ", data._id)
+            return io.emit("enemy-removed", data._id)
+        }
         tcpEnemies.forEach(enem => {
             if(data._id === enem._id){
                 enem._targetId = data.targetId
@@ -646,7 +668,7 @@ setInterval(() => {
 // electricslime counts now, down from an initial 250/250). Module-level,
 // same reasoning as the wander interval above it - runs once total, not
 // once per connection.
-const SLIME_SPAWN_CHECK_INTERVAL_MS = 2000
+const SLIME_SPAWN_CHECK_INTERVAL_MS = 500
 // how far from the player the new slime actually lands - never right on
 // top of them, same "ring" scatter (random angle, min/max radius) every
 // other spawn in this game already uses
@@ -700,7 +722,7 @@ setInterval(() => {
             respawnTime: 100,
         }
         tcpEnemies.push(newSlime as any)
-        io.emit("enemy-spawned", tcpEnemies)
+        io.emit("enemy-respawned", tcpEnemies)
     })
 }, SLIME_SPAWN_CHECK_INTERVAL_MS)
 
