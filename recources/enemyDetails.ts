@@ -1,6 +1,6 @@
 import { randNumString } from "../tools/tools"
 import { simpleCoreLoot, mediumCoreLoot, waterslimeCoreLoot, fireslimeCoreLoot, electricslimeCoreLoot } from "./coreDetails"
-import { generateSlimes, generateFireSlimes, generateElectricSlimes, generateMonoliths, generateLesserDemons } from "../generate-datas/genenemy"
+import { generateSlimes, generateFireSlimes, generateElectricSlimes, generateMonoliths, generateLesserDemons, generateDarkSlimes } from "../generate-datas/genenemy"
 
 let monolithBodyHeight = 2
 
@@ -12,7 +12,13 @@ let monolithBodyHeight = 2
 // same center every ring/band below is already scattered around - covering
 // the combined range every slime type's own band sits within (waterslime
 // 100-150, fireslime 300-600, electricslime 600-1000).
-export const OPENWORLD_SLIME_TERRITORY = { center: { x: 0, y: 0, z: 500 }, minDist: 0, maxDist: 1000 }
+// maxDist bumped 1000 -> 3000 so darkslime's own 1000-3000 band below
+// (and index.ts's dynamic SLIME_SPAWN_* top-up) actually gets covered by
+// this shared gate - a player past the old 1000 edge used to walk into a
+// completely empty stretch with nothing spawning/respawning near them at
+// all, this is what now fills that gap instead of just widening an
+// existing band.
+export const OPENWORLD_SLIME_TERRITORY = { center: { x: 0, y: 0, z: 500 }, minDist: 0, maxDist: 3000 }
 // applies OPENWORLD_SLIME_TERRITORY to every enemy a generator call
 // produced - .map() instead of baking .territory into the shared
 // slimeBase/fireSlimeBase/electricSlimeBase templates themselves
@@ -28,14 +34,19 @@ const enemyInterface = {
 
     encounterSound: false,
 
-    // TEMP DEBUG - bumped way up from 100 so a single kill (village
-    // waterslime/fireslime/electricslime, all built from this same
-    // enemyInterface) is guaranteed to trigger a level-up regardless of
-    // current character level, to make reproducing the "other player also
-    // gets exp" multiplayer bug fast to trigger over and over. Revert to
-    // 100 once done debugging.
-    expToGain: 999999,
-    bodyHeight: 1.8,
+    // reverted from a leftover TEMP DEBUG value (999999 - bumped way up to
+    // make a since-fixed "other player also gets exp" multiplayer bug easy
+    // to reproduce, never reverted after). The three live entries that
+    // spread this (waterslime/fireslime/electricslime below) all set their
+    // own real expToGain explicitly now anyway - this is just a sane
+    // fallback default for anything else built from enemyInterface without
+    // its own override, not a value anything currently actually relies on.
+    expToGain: 100,
+    // was 1.8 - unified to match genenemy.ts's own slimeBase (openworld
+    // waterslime/fireslime/electricslime), so the same-named slime is the
+    // same size everywhere instead of visibly taller in the village than
+    // in the open world
+    bodyHeight: 1,
     bodyWidenes: .9,
     origPos: { x: 3.6, y: 0, z: 130 },
     effects: [
@@ -61,10 +72,17 @@ const enemyInterface = {
     _canAttack: true, // If stunned turn to false
     _disabled: false, // skill.enemyBind - see index.ts's enemyBind handler
     _cursed: false, // dark magic's curse - see index.ts's enemyCurse handler
+    weaponBlocking: false,
+    magicBlocking: false,
+    IsInVulnerable: false,
     loots: [simpleCoreLoot],
+    // 10s - matching slimeBase's own respawnTime (genenemy.ts) now, so
+    // village and openworld slimes respawn at the same rate instead of
+    // this being 5s while openworld's own slimeBase was 15s for no
+    // particular reason
     respawnDetails: {
         willRespawn: true,
-        respawnTime: 5 * 1000,
+        respawnTime: 10 * 1000,
     }
 }
 
@@ -100,8 +118,18 @@ export default [
     // render regardless of how many end up alive at once.
     ...withTerritory(generateFireSlimes(50, 888, 1200, "ring", 0, 500, 300, 600)),
     ...withTerritory(generateElectricSlimes(50, 888, 2000, "ring", 0, 500, 600, 1000)),
-    // orangelith monoliths - further out than the slime ring, ~200 units from (0, 500)
-    ...generateMonoliths(5, 888, 300, "ring", 0, 500, 200, 260),
+    // orangelith monoliths - further out than the slime ring, ~200 units
+    // from (0, 500). Tagged with the same OPENWORLD_SLIME_TERRITORY the
+    // slimes already carry (not a separate monolith-only territory) - now
+    // that index.ts's own SLIME_SPAWN_* interval also spawns monoliths
+    // dynamically via generateMonoliths, they share the identical gate.
+    ...withTerritory(generateMonoliths(5, 888, 300, "ring", 0, 500, 200, 260)),
+    // darkslime - past electricslime's own 600-1000 band, filling the
+    // 1000-3000 stretch that used to be completely empty (see
+    // OPENWORLD_SLIME_TERRITORY's own comment above). Toughest of the four
+    // slimes by design (darkSlimeBase in genenemy.ts), matching "farther
+    // out = harder" for every other band in this ring.
+    ...withTerritory(generateDarkSlimes(50, 888, 800, "ring", 0, 500, 1000, 3000)),
     // single lesserdemon at the openworld center
     ...generateLesserDemons(1, 888, 300, "fixed", -34, 70),
     {...enemyInterface,
@@ -127,6 +155,9 @@ export default [
         hp: 580,
         maxHp: 580,
         loots: [waterslimeCoreLoot],
+        // own explicit value now, not enemyInterface's shared 999999 debug
+        // leftover - weakest slime variant, so the smallest exp
+        expToGain: 50,
         // deathSound: "slimedeath",
     },
     // fireslime/electricslime - same spot/stats as the waterslime above,
@@ -166,6 +197,7 @@ export default [
         hp: 580,
         maxHp: 580,
         loots: [fireslimeCoreLoot],
+        expToGain: 200,
         // deathSound: "slimedeath",
     },
     {...enemyInterface,
@@ -201,6 +233,7 @@ export default [
         hp: 580,
         maxHp: 580,
         loots: [electricslimeCoreLoot],
+        expToGain: 500,
         // deathSound: "slimedeath",
     },
     // {...enemyInterface,

@@ -1,5 +1,5 @@
 import { randNumString } from "../tools/tools"
-import { simpleCoreLoot, waterslimeCoreLoot, fireslimeCoreLoot, electricslimeCoreLoot } from "../recources/coreDetails"
+import { simpleCoreLoot, waterslimeCoreLoot, fireslimeCoreLoot, electricslimeCoreLoot, darkslimeCoreLoot } from "../recources/coreDetails"
 
 const slimeBase = {
     maxDistance: 0.5,
@@ -18,13 +18,14 @@ const slimeBase = {
     lvl: 1,
     hp: 2580,
     maxHp: 2580,
-    // TEMP DEBUG - bumped way up from 100 so a single kill (openworld
-    // water/fire/electric slimes, all built from this same slimeBase) is
-    // guaranteed to trigger a level-up regardless of current character
-    // level, to make reproducing the "other player also gets exp"
-    // multiplayer bug fast to trigger over and over. Revert to 100 once
-    // done debugging.
-    expToGain: 999999,
+    // reverted from a leftover TEMP DEBUG value (999999 - bumped way up to
+    // make a since-fixed "other player also gets exp" multiplayer bug easy
+    // to reproduce, never reverted after). This is waterslime's OWN real
+    // value now - the weakest slime variant, so the smallest exp - not just
+    // a shared fallback: fireSlimeBase/electricSlimeBase/darkSlimeBase below
+    // all override this explicitly with their own higher amount instead of
+    // inheriting it.
+    expToGain: 50,
     bodyHeight: 1,
     bodyWidenes: 0.9,
     effects: [
@@ -50,10 +51,16 @@ const slimeBase = {
     _canAttack: true,
     _disabled: false, // skill.enemyBind - see index.ts's enemyBind handler
     _cursed: false, // dark magic's curse - see index.ts's enemyCurse handler
+    weaponBlocking: false,
+    magicBlocking: false,
+    IsInVulnerable: false,
     loots: [waterslimeCoreLoot],
+    // 10s - matching enemyInterface's own respawnTime (enemyDetails.ts) now,
+    // so village and openworld slimes respawn at the same rate instead of
+    // this being 15s while the village ones were 5s for no particular reason
     respawnDetails: {
         willRespawn: true,
-        respawnTime: 15 * 1000,
+        respawnTime: 10 * 1000,
     },
 }
 
@@ -75,6 +82,7 @@ const fireSlimeBase = {
     skills: ['flamebrand'],
     canDodge: true,
     loots: [fireslimeCoreLoot],
+    expToGain: 200,
 }
 
 const electricSlimeBase = {
@@ -90,6 +98,45 @@ const electricSlimeBase = {
     skills: ['lightningbolt'],
     canDodge: true,
     loots: [electricslimeCoreLoot],
+    expToGain: 500,
+}
+
+// darkslime - the enemy filling OPENWORLD_SLIME_TERRITORY's far edge (past
+// electricslime's own 600-1000 band, see enemyDetails.ts's withTerritory
+// call for this one), so it's deliberately built as the toughest of the
+// slime family rather than just another same-strength recolor: real stat
+// bumps on top of slimeBase's own (lvl 1/hp 2580/dmg 5), not just a palette
+// swap. shadowbolt (skillsData.js - element: "dark") already exists and is
+// already enemy-usable (lesserDemonBase above casts it too), so reused
+// as-is instead of inventing a new skill. elementType: "dark" resolves to
+// the purple/black palette added in client/src/enemies/skins.js.
+const darkSlimeBase = {
+    ...slimeBase,
+    name: "darkslime",
+    dn: "Dark Slime",
+    elementType: "dark",
+    stats: {
+        dmg: 9,
+        magDmg: 3,
+        spd: 3,
+        atkSpd: 2,
+        accuracy: 1.2,
+        critical: 1.5,
+    },
+    lvl: 5,
+    hp: 4200,
+    maxHp: 4200,
+    // bodyHeight/bodyWidenes intentionally NOT overridden here anymore -
+    // used to be bigger (1.3/1.1) than slimeBase's own 1/0.9 to read as
+    // visibly heftier at a glance, matching its higher stats, but all four
+    // slime types are unified to the same size now - "toughest of the
+    // family" is still true (stats above), just not telegraphed by size
+    titles: ['dark slime'],
+    aptitude: ['dark'],
+    skills: ['shadowbolt'],
+    canDodge: true,
+    loots: [darkslimeCoreLoot],
+    expToGain: 2000,
 }
 
 const monolithBase = {
@@ -110,18 +157,24 @@ const monolithBase = {
     modelStyle: "monolith",
     // see client/src/enemies/createEnemy.js's own dodge-detection interval
     canDodge: true,
+    // was dmg:2/magDmg:1/accuracy:1/critical:1.4 - identical to or actually
+    // LOWER than slimeBase's own dmg:5 despite monolith being lvl 10 vs
+    // slime's lvl 1 and having 5700 hp vs 2580. Bumped so monolith is
+    // genuinely tougher than electricSlimeBase (which spreads slimeBase's
+    // stats unchanged) in melee dmg/magDmg/accuracy/critical too, not just
+    // hp/spd/atkSpd.
     stats: {
-        dmg: 2,
-        magDmg: 1,
+        dmg: 12,
+        magDmg: 4,
         spd: 7,
         atkSpd: 2.9,
-        accuracy: 1,
-        critical: 1.4,
+        accuracy: 1.3,
+        critical: 1.6,
     },
     lvl: 10,
     hp: 5700,
     maxHp: 5700,
-    expToGain: 240,
+    expToGain: 600,
     bodyHeight: 2,
     bodyWidenes: 1.1,
     actionType: "chasing",
@@ -153,6 +206,9 @@ const monolithBase = {
     _canAttack: true,
     _disabled: false, // skill.enemyBind - see index.ts's enemyBind handler
     _cursed: false, // dark magic's curse - see index.ts's enemyCurse handler
+    weaponBlocking: false,
+    magicBlocking: false,
+    IsInVulnerable: false,
     loots: [simpleCoreLoot],
     respawnDetails: {
         willRespawn: true,
@@ -223,6 +279,9 @@ const lesserDemonBase = {
     _canAttack: true,
     _disabled: false, // skill.enemyBind - see index.ts's enemyBind handler
     _cursed: false, // dark magic's curse - see index.ts's enemyCurse handler
+    weaponBlocking: false,
+    magicBlocking: false,
+    IsInVulnerable: false,
     loots: [simpleCoreLoot],
     respawnDetails: {
         willRespawn: true,
@@ -317,6 +376,10 @@ export function generateFireSlimes(total = 10, placeId = 1, areaSize = 300, area
 
 export function generateElectricSlimes(total = 10, placeId = 1, areaSize = 300, areaType = "village", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
     return generateEnemies(electricSlimeBase, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius)
+}
+
+export function generateDarkSlimes(total = 10, placeId = 1, areaSize = 300, areaType = "village", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
+    return generateEnemies(darkSlimeBase, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius)
 }
 
 export function generateMonoliths(total = 5, placeId = 1, areaSize = 300, areaType = "village", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {

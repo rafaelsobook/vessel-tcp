@@ -72,6 +72,24 @@ export const electricslimeCoreLoot = {
     rarity: "normal"
 }
 
+export const darkslimeCoreLoot = {
+    itemId: randNumString(),
+    name: "darkslimecore",
+    dn: "dark slime core",
+    itemCateg: "crafting",
+    itemType: "core",
+    weaponType: false,
+    equipAbilities: {
+        dmg: 10, def: 10, magicDmg: 10, plusStr: 0, plusDex: 0, plusInt: 0,
+        plusDurability: 30
+    },
+    equiped: false,
+    price: { coinType: "bronze", pieces: 50 },
+    qnty: 1,
+    desc: "a shadow-wreathed core taken from a dark slime, useful for enhancing items",
+    rarity: "normal"
+}
+
 export const mediumCoreLoot = {
     itemId: randNumString(),
     name: "mediumcore",

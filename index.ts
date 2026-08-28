@@ -7,7 +7,26 @@ import { randNumString, randNum } from "./tools/tools"
 import { placesMD } from "./placedetails/places"
 import enemyArray, { OPENWORLD_SLIME_TERRITORY } from "./recources/enemyDetails"
 import startingQuests, { createSlaySlimesQuest, F_RANK_QUEST_COUNT } from "./recources/quests"
-import { generateSlimes, generateFireSlimes, generateElectricSlimes } from "./generate-datas/genenemy"
+import { generateSlimes, generateFireSlimes, generateElectricSlimes, generateMonoliths, generateDarkSlimes, generateLesserDemons } from "./generate-datas/genenemy"
+
+export const enemyLengthsInPlace = [
+    {   
+        placeId: 1,
+        areaType: "village",
+        placeWidth:      300,
+        placeHeight:     300,
+        name: "waterslime",
+        length: 3
+    },
+    {   
+        placeId: 1,
+        areaType: "village",
+        placeWidth:      300,
+        placeHeight:     300,
+        name: "fireslime",
+        length: 2
+    },
+]
 
 const app = express()
 const server = http.createServer(app)
@@ -55,7 +74,10 @@ type Tplayers = {
     dirTarg: { x: number, y: number, z: number},
     items: any,
     skills: any[],
-    hasWeapon: boolean
+    hasWeapon: boolean,
+    weaponBlocking: boolean,
+    magicBlocking: boolean,
+    IsInVulnerable: boolean
 }
 
 let players: Tplayers[] = []
@@ -130,6 +152,9 @@ io.on("connection", (socket: Socket) => {
         _moving: false,
         _minning: false,
         hasWeapon,
+        weaponBlocking: false,
+        magicBlocking: false,
+        IsInVulnerable: false,
         socketId: socket.id})
         // if (callback) {
         //     callback({socketId: socket.id, placesMD});
@@ -155,9 +180,23 @@ io.on("connection", (socket: Socket) => {
         const { ownerId, mode, weaponName} = data
         let player = players.find(user => user.owner === ownerId)
         if(!player) return
-        
+
         player.mode = mode
         io.emit("emitted-mode", data)
+    })
+    // r-click hold-to-block (inputMovement.js's activateMouseControls,
+    // relayed via emits.js's emitWeaponBlock) - same store-on-Tplayers-then-
+    // rebroadcast shape as emitMode right above. Kept on `players` (not
+    // just relayed blind) so a client that joins/re-syncs mid-fight can
+    // read this player's current stance off the roster instead of having
+    // missed the one-off toggle event entirely.
+    safeOn(socket, "emitWeaponBlock", data => {
+        const { ownerId, isBlocking } = data
+        let player = players.find(user => user.owner === ownerId)
+        if(!player) return
+
+        player.weaponBlocking = isBlocking
+        io.emit("emitted-weaponblock", data)
     })
     safeOn(socket, "emitLoc", data => {
         const { ownerId, pos, dirTarg, mode, weaponName} = data
@@ -688,11 +727,23 @@ const SLIME_SPAWN_DIST_MAX = 25
 // anything this interval just spawned reliably still reads as "covered"
 // on the very next check even after a second of player movement.
 const SLIME_SPAWN_NEARBY_RADIUS = 40
-// waterslime/fireslime/electricslime, one random pick per qualifying
-// player per tick - "aslong as I am in there territory" was given as a
-// single shared gate (OPENWORLD_SLIME_TERRITORY) covering all three types
-// together, not a separate per-type sub-range check
-const SLIME_SPAWN_GENERATORS = [generateFireSlimes, generateElectricSlimes, generateSlimes]
+// waterslime/fireslime/electricslime/orangelith/darkslime, one random pick
+// per qualifying player per tick - "as long as I am in their territory" was
+// given as a single shared gate (OPENWORLD_SLIME_TERRITORY) covering all
+// five types together, not a separate per-type sub-range check. Monoliths
+// and darkslime reuse this exact same territory (not a separate one of
+// their own) - still named SLIME_SPAWN_* despite generateMonoliths/
+// generateDarkSlimes being in here too, same constants/interval, just a
+// wider generator pool now. Each generator call below still gets its own
+// band via SLIME_SPAWN_DIST_MIN/MAX around the player, same as always -
+// this pool only decides WHICH type can spawn near a player anywhere
+// inside the whole 0-3000 territory, not where within it. That's fine:
+// unlike the static withTerritory bands above (which keep each type in
+// its own ring), the dynamic top-up has always let any of these spawn
+// near any qualifying player regardless of distance from center - a
+// darkslime can already turn up close to spawn this way, same as a
+// monolith or electricslime could before it.
+const SLIME_SPAWN_GENERATORS = [generateFireSlimes, generateElectricSlimes, generateSlimes, generateMonoliths, generateDarkSlimes]
 setInterval(() => {
     players.forEach(player => {
         if(player.currentPlace?.placeId !== 888) return
@@ -725,6 +776,46 @@ setInterval(() => {
         io.emit("enemy-respawned", tcpEnemies)
     })
 }, SLIME_SPAWN_CHECK_INTERVAL_MS)
+
+// enemyLengthsInPlace quota top-up (placeId 1's own waterslime/fireslime
+// counts, see the top of this file) - a flat "keep at least `length` of
+// `name` alive in `placeId`" check, distinct from the openworld interval
+// right above it (that one tops up based on PLAYER PROXIMITY, this one just
+// tracks a raw population floor per place regardless of where anyone is
+// standing - village slimes don't need a player nearby to justify existing).
+// generateEnemies (genenemy.ts) already assigns each generated enemy its own
+// random _id - no need to roll one here separately.
+const ENEMY_QUOTA_CHECK_INTERVAL_MS = 10 * 1000
+const ENEMY_GENERATOR_BY_NAME: Record<string, typeof generateSlimes> = {
+    waterslime: generateSlimes,
+    fireslime: generateFireSlimes,
+    electricslime: generateElectricSlimes,
+    darkslime: generateDarkSlimes,
+    orangelith: generateMonoliths,
+    lesserdemon: generateLesserDemons,
+}
+setInterval(() => {
+    enemyLengthsInPlace.forEach(quota => {
+        const generator = ENEMY_GENERATOR_BY_NAME[quota.name]
+        if(!generator){
+            console.warn(`[enemyQuota] no generator registered for "${quota.name}" - skipping`)
+            return
+        }
+
+        const currentCount = tcpEnemies.filter(enem =>
+            enem.currentPlaceId === quota.placeId && enem.name === quota.name
+        ).length
+        const shortfall = quota.length - currentCount
+        if(shortfall <= 0) return
+
+        // centered on world origin (0, 0), not OPENWORLD_SLIME_TERRITORY's
+        // own (0, 500) - enemyLengthsInPlace is village/placeId-anchored
+        // areas, not the openworld territory the interval above already owns
+        const newEnemies = generator(shortfall, quota.placeId, quota.placeWidth, quota.areaType, 0, 0, 0, 0)
+        tcpEnemies.push(...(newEnemies as any[]))
+        io.emit("enemy-respawned", tcpEnemies)
+    })
+}, ENEMY_QUOTA_CHECK_INTERVAL_MS)
 
 function removeCharacter(ownerId: string, playerName: string, placeId: number){
     log(playerName , " disconnecting ... ")    
