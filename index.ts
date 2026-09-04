@@ -8,6 +8,7 @@ import { placesMD } from "./placedetails/places"
 import enemyArray, { OPENWORLD_SLIME_TERRITORY } from "./recources/enemyDetails"
 import startingQuests, { createSlaySlimesQuest, F_RANK_QUEST_COUNT } from "./recources/quests"
 import { generateSlimes, generateFireSlimes, generateElectricSlimes, generateMonoliths, generateDarkSlimes, generateLesserDemons } from "./generate-datas/genenemy"
+import { startingTreasures } from "./recources/treasures"
 
 export const enemyLengthsInPlace = [
     {   
@@ -80,12 +81,35 @@ type Tplayers = {
     IsInVulnerable: boolean
 }
 
+// matches treasures.ts's createSwordTreasure return shape - itemDetail kept
+// loose (any) since it's just whatever obtain()-ready item shape a given
+// treasure holds (swordsdata.js's sword shape for now, others later), not
+// something this server ever reads into/validates field-by-field
+type Ttreasure = {
+    itemId: string
+    pos: { x: number, y: number, z: number }
+    currentPlaceId: number
+    itemDetail: any
+}
+
+// client/src/components/campcraft.js's crafted structures (bonfire for
+// now) - unlike Ttreasure above, these are never removed once placed (a
+// bonfire doesn't get "picked up" the way a chest does), and there's no
+// starting/seeded array - every entry here only ever comes from a player
+// actually crafting one at runtime (the "craft-bonfire" handler below).
+type Tbonfire = {
+    craftId: string
+    pos: { x: number, y: number, z: number }
+    currentPlaceId: number
+}
+
 let players: Tplayers[] = []
 let gates: unknown[] = []
 
 let tcpEnemies = enemyArray
 let quests = startingQuests
-let treasures: unknown[] = []
+let treasures: Ttreasure[] = startingTreasures
+let bonfires: Tbonfire[] = []
 
 // enemy._id -> a per-bind counter, only used by the enemyBind handler below
 // (skill.enemyBind) - lets a second bind landing on an already-bound enemy
@@ -161,7 +185,32 @@ io.on("connection", (socket: Socket) => {
         // }
 
         console.log(players)
-        io.emit("userJoined", { currentPlaceId: data.currentPlace.placeId, newPlayerName: data.name,  players, placesMD, tcpEnemies, quests }) // always send the updated players count
+        io.emit("userJoined", { currentPlaceId: data.currentPlace.placeId, newPlayerName: data.name,
+            players, placesMD, tcpEnemies, quests,
+            treasures, bonfires
+        }) // always send the updated players count
+    })
+
+    // client/src/components/campcraft.js's own craft flow already spawns
+    // the bonfire LOCALLY the instant the player crafts it (no waiting on
+    // a round-trip for their own client - same "client acts immediately,
+    // server just relays to everyone else" trust level every other action
+    // in this game already gets, e.g. enemyIsHit never waiting on the
+    // server to confirm a hit landed before showing it). This is only
+    // what makes every OTHER connected client also see it, and what a
+    // fresh joiner's own userJoined payload above replays it from.
+    //
+    // Bare io.emit (not socket.broadcast.emit), same as "treasure-removed"
+    // above - the crafting client gets this echoed back to itself too, but
+    // that's fine/expected: it already spawned + tracked this craftId
+    // locally (worldsocket.js's own pushBonfireOnScene), so its own
+    // reCreateMeshesInScene-style handling of this event is a harmless
+    // no-op rather than a double-spawn.
+    safeOn(socket, "craft-bonfire", data => {
+        const { placeId, position, craftId } = data
+        const bonfire: Tbonfire = { craftId, pos: position, currentPlaceId: placeId }
+        bonfires.push(bonfire)
+        io.emit("bonfire-crafted", bonfire)
     })
 
     // WORLD CHAT - simple global relay, no rooms/parties. tcp has no db
@@ -486,6 +535,23 @@ io.on("connection", (socket: Socket) => {
         console.log("enemy removed ", enemyId)
         console.log("tcpEnemies ", tcpEnemies.length)
         io.emit("enemy-removed", enemyId)
+    })
+    // A treasure chest getting opened (client's createtreasure.js, on
+    // interact) - same shape as removeEnemy right above (a bare id string,
+    // not an object) on purpose. Filtering here + broadcasting is naturally
+    // idempotent (a second removeTreasure for an id already gone is just a
+    // no-op filter and a redundant, harmless re-broadcast), which matters
+    // since two players could plausibly click the same chest within the
+    // same round-trip window - this doesn't resolve who "wins" server-side,
+    // it just makes sure every client's scene ends up agreeing the chest is
+    // gone. Client-authoritative, same trust level this whole server
+    // already gives combat/loot (see enemyIsHit's own comment on misses
+    // never being seen here either) - not a hardened anti-duplication lock.
+    safeOn(socket, "removeTreasure", treasureId => {
+        treasures = treasures.filter(treasure => treasure.itemId !== treasureId)
+        console.log("treasure removed ", treasureId)
+        console.log("treasures ", treasures.length)
+        io.emit("treasure-removed", treasureId)
     })
     safeOn(socket, "enemyWillAttack", data => {
         const { pos } = data
