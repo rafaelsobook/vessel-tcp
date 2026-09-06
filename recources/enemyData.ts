@@ -124,7 +124,7 @@ export const orangelith = {
     bodyHeight: 2,
     origPos: { x: 3.6, z: -40 },
     effects: [
-        { effectType: 'poisoned', chance: 10, permanent: true, dn: 'Poison Sting', spcost: 20, hpcost: 10, mpcost: 0, hungercost: 4, energycost: 0 }
+        { effectType: 'poisoned', chance: 10, permanent: true, dn: 'Poison Sting', spcost: 20, hpcost: 10, mpcost: 0, hungercost: 4, energycost: 0, soundPlayPerDmg: 'dmgpm' }
     ],
     effectsWhenHit: [],
     titles: ['stinger'],

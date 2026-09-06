@@ -182,7 +182,7 @@ const monolithBase = {
     deathSound: "beeS",
     encounterSound: "beeS",
     effects: [
-        { effectType: 'poisoned', chance: 10, permanent: true, dn: 'Venom Extracted', spcost: 20, hpcost: 10, mpcost: 0, hungercost: 4, energycost: 0 },
+        { effectType: 'poisoned', chance: 10, permanent: true, dn: 'Venom Extracted', spcost: 20, hpcost: 10, mpcost: 0, hungercost: 4, energycost: 0, soundPlayPerDmg: 'dmgpm' },
     ],
     effectsWhenHit: [],
     titles: ['stinger'],

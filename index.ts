@@ -57,6 +57,7 @@ type Tplayers = {
     owner: string,
     name: string,
     lvl: number,
+    gender: string, // "male"/"female" - see getCharSocket()'s own comment
     cloth: string,
     pants: string,
     hair: string,
