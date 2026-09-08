@@ -16,8 +16,8 @@ const slimeBase = {
         critical: 1.4,
     },
     lvl: 1,
-    hp: 2580,
-    maxHp: 2580,
+    hp: 1000,
+    maxHp: 1000,
     // reverted from a leftover TEMP DEBUG value (999999 - bumped way up to
     // make a since-fixed "other player also gets exp" multiplayer bug easy
     // to reproduce, never reverted after). This is waterslime's OWN real
@@ -26,7 +26,7 @@ const slimeBase = {
     // all override this explicitly with their own higher amount instead of
     // inheriting it.
     expToGain: 50,
-    bodyHeight: 1,
+    bodyHeight: 1.15,
     bodyWidenes: 0.9,
     effects: [
         { effectType: 'spdrain', chance: 10, permanent: false, dn: 'SP Drained', spcost: 20, hpcost: 0, mpcost: 0, hungercost: 4, energycost: 0 },
@@ -63,7 +63,6 @@ const slimeBase = {
         respawnTime: 10 * 1000,
     },
 }
-
 // fire/electric variants of slimeBase - same body/stats template, just the
 // element/loot/skill swapped in, same pattern enemyDetails.ts's own
 // standalone fireslime/electricslime entries (village, placeId 1) already
@@ -83,6 +82,8 @@ const fireSlimeBase = {
     canDodge: true,
     loots: [fireslimeCoreLoot],
     expToGain: 200,
+    hp: 2500,
+    maxHp: 2500,
 }
 
 const electricSlimeBase = {
@@ -99,6 +100,8 @@ const electricSlimeBase = {
     canDodge: true,
     loots: [electricslimeCoreLoot],
     expToGain: 500,
+    hp: 3000,
+    maxHp: 3000,
 }
 
 // darkslime - the enemy filling OPENWORLD_SLIME_TERRITORY's far edge (past
@@ -116,10 +119,10 @@ const darkSlimeBase = {
     dn: "Dark Slime",
     elementType: "dark",
     stats: {
-        dmg: 9,
-        magDmg: 3,
-        spd: 3,
-        atkSpd: 2,
+        dmg: 10,
+        magDmg: 10,
+        spd: 3.5,
+        atkSpd: 3,
         accuracy: 1.2,
         critical: 1.5,
     },
@@ -215,6 +218,88 @@ const monolithBase = {
         respawnTime: 30 * 1000,
     },
 }
+
+// forestdeer - modelStyle "deer" (models/monsters/deer.glb, already on disk,
+// with real idle1/walking/running1/attack1/death clips - confirmed by
+// grepping the glb's own text, not assumed) needs its own loadMonsterRoot
+// call + switch case wired in client-side (containers.js/worldsocket.js/
+// createEnemy.js) before this actually renders, same as every other
+// modelStyle here. Also still needs a real body texture at
+// images/textures/enemy/deer/forestdeer.jpg (createMonsterMaterial's own
+// path convention, see monolith/goblin's existing texture folders) - not
+// something this file can provide.
+//
+// deerBase (spread in below) is kept as its own object rather than inlined
+// - stats.walkSpd is the one field here that's genuinely new (no other
+// enemy base has it): renderer.js's own wander/roam movement branch reads
+// it to move at a slower pace and play the real "walking" clip above while
+// idly roaming, instead of always sprinting everywhere on "running" the way
+// every walkSpd-less enemy (slime/monolith/lesserdemon) still does.
+const deerBase = {
+    canDodge: true,
+    stats: {
+        dmg: 40,
+        magDmg: 4,
+        spd: 8,
+        walkSpd: 3,
+        atkSpd: 5,
+        accuracy: 1.3,
+        critical: 1.6,
+    },
+}
+const forestDeer = {
+    ...deerBase,
+    maxDistance: 0.7,
+    name: "forestdeer",
+    dn: "Forest Deer",
+    modelStyle: "deer",
+    lvl: 20,
+    hp: 5700,
+    maxHp: 5700,
+    expToGain: 1000,
+    bodyHeight: 3,
+    bodyWidenes: 1.1,
+    actionType: "chasing",
+    effects: [
+        { effectType: 'poisoned', chance: 10, permanent: true, dn: 'Venom Extracted', spcost: 20, hpcost: 10, mpcost: 0, hungercost: 4, energycost: 0, soundPlayPerDmg: 'dmgpm' },
+    ],
+    effectsWhenHit: [],
+    skills: [],
+    blessings: [],
+    status: [],
+    regens: { sp: 1, hp: 1, mana: 1 },
+    monsSoul: 2,
+    race: "monster",
+    characterType: "enemy",
+    weaponBlocking: false,
+    magicBlocking: false,
+    IsInVulnerable: false,
+    // required - createEnemy.js's own death handler does `loots.length` with
+    // no guard, so an enemy base missing this crashes the client on death.
+    // simpleCoreLoot, not mediumCoreLoot, to match its lvl/hp tier (monolith
+    // lvl10/hp5700 and lesserdemon lvl30/hp12000 both use simpleCoreLoot too -
+    // mediumCoreLoot is reserved for woodbane, a much bigger hp26700 enemy)
+    loots: [simpleCoreLoot],
+    respawnDetails: {
+        willRespawn: true,
+        respawnTime: 30 * 1000,
+    },
+}
+
+// jasfer/lumina/nightmare/scorch/wisf - pure texture recolors of forestDeer
+// (images/textures/enemy/deer/<name>.jpg, all 6 already on disk, confirmed).
+// Same modelStyle "deer" (one shared deer.glb), same combat stats/loot/
+// effects as forestDeer - only name/dn differ, since that's what
+// createMonsterMaterial's own ${modelStyle}/${name}.jpg path convention
+// keys its texture lookup on. Not elementally distinct yet (no
+// aptitude/skill changes) - can be split apart the same way
+// fireSlimeBase/electricSlimeBase diverge from slimeBase if these are
+// meant to play differently later, not just look different.
+const jasferDeer     = { ...forestDeer, name: "jasferdeer",    dn: "Jasfer Deer" }
+const luminaDeer      = { ...forestDeer, name: "luminadeer",    dn: "Lumina Deer" }
+const nightmareDeer   = { ...forestDeer, name: "nightmaredeer", dn: "Nightmare Deer" }
+const scorchDeer      = { ...forestDeer, name: "scorchdeer",    dn: "Scorch Deer" }
+const wisfDeer        = { ...forestDeer, name: "wisfdeer",      dn: "Wisf Deer" }
 
 const lesserDemonBase = {
     // was 7.5, same "stops and swings from way too far away" issue as
@@ -384,6 +469,30 @@ export function generateDarkSlimes(total = 10, placeId = 1, areaSize = 300, area
 
 export function generateMonoliths(total = 5, placeId = 1, areaSize = 300, areaType = "village", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
     return generateEnemies(monolithBase, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius)
+}
+
+export function generateForestDeer(total = 10, placeId = 1, areaSize = 300, areaType = "village", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
+    return generateEnemies(forestDeer, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius)
+}
+
+export function generateJasferDeer(total = 10, placeId = 1, areaSize = 300, areaType = "village", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
+    return generateEnemies(jasferDeer, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius)
+}
+
+export function generateLuminaDeer(total = 10, placeId = 1, areaSize = 300, areaType = "village", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
+    return generateEnemies(luminaDeer, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius)
+}
+
+export function generateNightmareDeer(total = 10, placeId = 1, areaSize = 300, areaType = "village", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
+    return generateEnemies(nightmareDeer, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius)
+}
+
+export function generateScorchDeer(total = 10, placeId = 1, areaSize = 300, areaType = "village", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
+    return generateEnemies(scorchDeer, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius)
+}
+
+export function generateWisfDeer(total = 10, placeId = 1, areaSize = 300, areaType = "village", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
+    return generateEnemies(wisfDeer, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius)
 }
 
 export function generateLesserDemons(total = 1, placeId = 1, areaSize = 300, areaType = "fixed", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {

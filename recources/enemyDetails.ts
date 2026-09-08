@@ -1,6 +1,6 @@
 import { randNumString } from "../tools/tools"
 import { simpleCoreLoot, mediumCoreLoot, waterslimeCoreLoot, fireslimeCoreLoot, electricslimeCoreLoot } from "./coreDetails"
-import { generateSlimes, generateFireSlimes, generateElectricSlimes, generateMonoliths, generateLesserDemons, generateDarkSlimes } from "../generate-datas/genenemy"
+import { generateSlimes, generateFireSlimes, generateElectricSlimes, generateMonoliths, generateLesserDemons, generateDarkSlimes, generateForestDeer, generateJasferDeer, generateLuminaDeer, generateNightmareDeer, generateScorchDeer, generateWisfDeer } from "../generate-datas/genenemy"
 
 let monolithBodyHeight = 2
 
@@ -41,7 +41,7 @@ const enemyInterface = {
     // own real expToGain explicitly now anyway - this is just a sane
     // fallback default for anything else built from enemyInterface without
     // its own override, not a value anything currently actually relies on.
-    expToGain: 100,
+    expToGain: 50,
     // was 1.8 - unified to match genenemy.ts's own slimeBase (openworld
     // waterslime/fireslime/electricslime), so the same-named slime is the
     // same size everywhere instead of visibly taller in the village than
@@ -124,6 +124,12 @@ export default [
     // that index.ts's own SLIME_SPAWN_* interval also spawns monoliths
     // dynamically via generateMonoliths, they share the identical gate.
     ...withTerritory(generateMonoliths(5, 888, 300, "ring", 0, 500, 200, 260)),
+    // forestdeer - fills the 150-200 gap between waterslime's own ring
+    // (100-150) and monolith's (200-260), previously empty. 10 (between
+    // monolith's 5 and a slime band's 50) since it's a rarer, tougher single
+    // enemy (lvl20/hp5700/dmg40, genenemy.ts's own forestDeer), not a
+    // common trash mob.
+    ...withTerritory(generateForestDeer(10, 888, 400, "ring", 0, 500, 150, 200)),
     // darkslime - past electricslime's own 600-1000 band, filling the
     // 1000-3000 stretch that used to be completely empty (see
     // OPENWORLD_SLIME_TERRITORY's own comment above). Toughest of the four
@@ -236,6 +242,21 @@ export default [
         expToGain: 500,
         // deathSound: "slimedeath",
     },
+    // one of each deer texture variant, village (placeId 1) - "fixed"
+    // areaType lands each exactly at (centerX, centerZ) with no scatter,
+    // same pattern generateLesserDemons(1, 888, ...) uses for its own single
+    // openworld spawn. Continues the waterslime/fireslime/electricslime row
+    // above (3.6/6.6/9.6 along x) in the same 3-unit spacing, purely so all
+    // 6 are lined up and easy to walk down and look at - genenemy.ts's own
+    // jasferDeer/luminaDeer/nightmareDeer/scorchDeer/wisfDeer bases already
+    // carry their own real stats/loot/effects (recolors of forestDeer), no
+    // need to redeclare them here.
+    ...generateForestDeer(1, 1, 300, "fixed", 12.6, 130),
+    ...generateJasferDeer(1, 1, 300, "fixed", 15.6, 130),
+    ...generateLuminaDeer(1, 1, 300, "fixed", 18.6, 130),
+    ...generateNightmareDeer(1, 1, 300, "fixed", 21.6, 130),
+    ...generateScorchDeer(1, 1, 300, "fixed", 24.6, 130),
+    ...generateWisfDeer(1, 1, 300, "fixed", 27.6, 130),
     // {...enemyInterface,
     //     _id: `${randNumString()}`,
     //     x: 3.6,
