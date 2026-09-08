@@ -155,6 +155,7 @@ const monolithBase = {
     // matching slimeBase's own maxDistance-to-bodyWidenes ratio (0.5/0.9)
     // with a little extra for this enemy's taller frame (bodyHeight 2).
     maxDistance: 0.7,
+    elementType: "earth",
     name: "orangelith",
     dn: "Orange Lith",
     modelStyle: "monolith",
@@ -237,6 +238,9 @@ const monolithBase = {
 // every walkSpd-less enemy (slime/monolith/lesserdemon) still does.
 const deerBase = {
     canDodge: true,
+    elementType: "none",
+    maxDistance: 0.7,
+    modelStyle: "deer",
     stats: {
         dmg: 40,
         magDmg: 4,
@@ -246,13 +250,16 @@ const deerBase = {
         accuracy: 1.3,
         critical: 1.6,
     },
+    effects: [
+        // { effectType: 'poisoned', chance: 10, permanent: true, dn: 'Venom Extracted', spcost: 20, hpcost: 10, mpcost: 0, hungercost: 4, energycost: 0, soundPlayPerDmg: 'dmgpm' },
+    ],
 }
 const forestDeer = {
     ...deerBase,
-    maxDistance: 0.7,
+
     name: "forestdeer",
     dn: "Forest Deer",
-    modelStyle: "deer",
+
     lvl: 20,
     hp: 5700,
     maxHp: 5700,
@@ -260,9 +267,7 @@ const forestDeer = {
     bodyHeight: 3,
     bodyWidenes: 1.1,
     actionType: "chasing",
-    effects: [
-        { effectType: 'poisoned', chance: 10, permanent: true, dn: 'Venom Extracted', spcost: 20, hpcost: 10, mpcost: 0, hungercost: 4, energycost: 0, soundPlayPerDmg: 'dmgpm' },
-    ],
+
     effectsWhenHit: [],
     skills: [],
     blessings: [],
@@ -295,11 +300,11 @@ const forestDeer = {
 // aptitude/skill changes) - can be split apart the same way
 // fireSlimeBase/electricSlimeBase diverge from slimeBase if these are
 // meant to play differently later, not just look different.
-const jasferDeer     = { ...forestDeer, name: "jasferdeer",    dn: "Jasfer Deer" }
-const luminaDeer      = { ...forestDeer, name: "luminadeer",    dn: "Lumina Deer" }
-const nightmareDeer   = { ...forestDeer, name: "nightmaredeer", dn: "Nightmare Deer" }
-const scorchDeer      = { ...forestDeer, name: "scorchdeer",    dn: "Scorch Deer" }
-const wisfDeer        = { ...forestDeer, name: "wisfdeer",      dn: "Wisf Deer" }
+const jasferDeer     = { ...forestDeer, elementType: "none", name: "jasferdeer",    dn: "Jasfer Deer" }
+const luminaDeer      = { ...forestDeer,elementType: "none", name: "luminadeer",    dn: "Lumina Deer" }
+const nightmareDeer   = { ...forestDeer,elementType: "none", name: "nightmaredeer", dn: "Nightmare Deer" }
+const scorchDeer      = { ...forestDeer,elementType: "none", name: "scorchdeer",    dn: "Scorch Deer" }
+const wisfDeer        = { ...forestDeer,elementType: "none", name: "wisfdeer",      dn: "Wisf Deer" }
 
 const lesserDemonBase = {
     // was 7.5, same "stops and swings from way too far away" issue as
