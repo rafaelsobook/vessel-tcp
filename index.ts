@@ -9,6 +9,7 @@ import enemyArray, { OPENWORLD_SLIME_TERRITORY } from "./recources/enemyDetails"
 import startingQuests, { createSlaySlimesQuest, F_RANK_QUEST_COUNT } from "./recources/quests"
 import { generateSlimes, generateFireSlimes, generateElectricSlimes, generateMonoliths, generateDarkSlimes, generateLesserDemons } from "./generate-datas/genenemy"
 import { startingTreasures } from "./recources/treasures"
+import { startingWagons, createWagon, WAGON_HEADINGS, startingHarnessDeer, createHarnessDeer, Tharnessdeer, Twagon } from "./recources/wagons"
 
 export const enemyLengthsInPlace = [
     {   
@@ -111,6 +112,14 @@ let tcpEnemies = enemyArray
 let quests = startingQuests
 let treasures: Ttreasure[] = startingTreasures
 let bonfires: Tbonfire[] = []
+// wagons is now the FOLLOWER array (recources/wagons.ts's own header
+// comment on the flip) - each entry only references which harness deer
+// pulls it via deerId, no movement law of its own. Never removed once
+// placed (same permanence as bonfires above).
+let wagons: Twagon[] = startingWagons
+// harness deer - the primary/driving entity of the pairing now, one per
+// wagon. Same permanence as wagons above.
+let harnessDeer: Tharnessdeer[] = startingHarnessDeer
 
 // enemy._id -> a per-bind counter, only used by the enemyBind handler below
 // (skill.enemyBind) - lets a second bind landing on an already-bound enemy
@@ -188,7 +197,7 @@ io.on("connection", (socket: Socket) => {
         console.log(players)
         io.emit("userJoined", { currentPlaceId: data.currentPlace.placeId, newPlayerName: data.name,
             players, placesMD, tcpEnemies, quests,
-            treasures, bonfires
+            treasures, bonfires, wagons, harnessDeer
         }) // always send the updated players count
     })
 
@@ -883,6 +892,55 @@ setInterval(() => {
         io.emit("enemy-respawned", tcpEnemies)
     })
 }, ENEMY_QUOTA_CHECK_INTERVAL_MS)
+
+// wagon quota top-up (openworld/placeId 888) - same "keep at least N of
+// these alive" shape as enemyLengthsInPlace's own quota check right above,
+// not a literal "spawn 4 more every 10s forever": recources/wagons.ts's own
+// wagons are permanent (no removal path exists at all, same as bonfires),
+// so in steady state this finds nothing missing and does nothing, every
+// tick, forever - it only actually creates anything the first time a
+// heading turns out to be missing (a fresh boot where startingWagons somehow
+// didn't seed, or this array got cleared some other way). This is what
+// actually explains "I don't see the wagons" if wagons was never populated
+// in the first place - restarting this server process is what makes the
+// FIRST tick of this pick that up; this interval alone can't fix a client
+// that's still holding an old cached bundle/socket connection from before
+// wagons existed at all, only a stale/empty wagons array on THIS process.
+const WAGON_QUOTA_CHECK_INTERVAL_MS = 10 * 1000
+setInterval(() => {
+    // deer is the primary entity now (recources/wagons.ts's own header
+    // comment on why) - check ITS headings first, and spawn a paired
+    // wagon for anything freshly created here
+    const missingHeadings = Object.keys(WAGON_HEADINGS).filter(headingName =>
+        !harnessDeer.some(d => d.currentPlaceId === 888 && d.name === `harnessdeer-${headingName}`)
+    )
+    if(missingHeadings.length){
+        const newDeer = missingHeadings.map(headingName => createHarnessDeer(headingName, WAGON_HEADINGS[headingName]))
+        harnessDeer.push(...newDeer)
+        // a freshly topped-up deer needs its own wagon too, same 1:1
+        // pairing startingHarnessDeer/startingWagons already establish -
+        // otherwise a deer that only ever exists because THIS check
+        // created it would stay permanently cart-less
+        wagons.push(...newDeer.map(createWagon))
+        log(`[wagonQuota] topped up missing harness deer/wagon headings: ${missingHeadings.join(", ")}`)
+        io.emit("harness-deer-spawned", harnessDeer)
+        io.emit("wagons-spawned", wagons)
+        return
+    }
+
+    // deer were all already fine, but wagon is its own separate array
+    // (recources/wagons.ts's own Twagon) - check independently in case a
+    // wagon entry itself ever went missing without its deer also going
+    // missing (nothing removes either today, but this is the same "cheap
+    // to keep correct" self-healing check every other quota interval in
+    // this file already follows)
+    const deerMissingWagon = harnessDeer.filter(d => !wagons.some(w => w.deerId === d._id))
+    if(!deerMissingWagon.length) return
+
+    wagons.push(...deerMissingWagon.map(createWagon))
+    log(`[wagonQuota] topped up missing wagons for: ${deerMissingWagon.map(d => d.name).join(", ")}`)
+    io.emit("wagons-spawned", wagons)
+}, WAGON_QUOTA_CHECK_INTERVAL_MS)
 
 function removeCharacter(ownerId: string, playerName: string, placeId: number){
     log(playerName , " disconnecting ... ")    
