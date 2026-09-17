@@ -9,7 +9,7 @@ import enemyArray, { OPENWORLD_SLIME_TERRITORY } from "./recources/enemyDetails"
 import startingQuests, { createSlaySlimesQuest, F_RANK_QUEST_COUNT } from "./recources/quests"
 import { generateSlimes, generateFireSlimes, generateElectricSlimes, generateMonoliths, generateDarkSlimes, generateLesserDemons } from "./generate-datas/genenemy"
 import { startingTreasures } from "./recources/treasures"
-import { startingWagons, createWagon, WAGON_HEADINGS, startingHarnessDeer, createHarnessDeer, Tharnessdeer, Twagon } from "./recources/wagons"
+import { createWagon, WAGON_HEADINGS, createHarnessDeer, Tharnessdeer, Twagon } from "./recources/wagons"
 
 export const enemyLengthsInPlace = [
     {   
@@ -115,11 +115,13 @@ let bonfires: Tbonfire[] = []
 // wagons is now the FOLLOWER array (recources/wagons.ts's own header
 // comment on the flip) - each entry only references which harness deer
 // pulls it via deerId, no movement law of its own. Never removed once
-// placed (same permanence as bonfires above).
-let wagons: Twagon[] = startingWagons
+// placed (same permanence as bonfires above). Starts EMPTY, not
+// pre-populated - the staggered startup sequence below fills this in one
+// heading at a time instead of all 4 appearing the instant the server boots.
+let wagons: Twagon[] = []
 // harness deer - the primary/driving entity of the pairing now, one per
-// wagon. Same permanence as wagons above.
-let harnessDeer: Tharnessdeer[] = startingHarnessDeer
+// wagon. Same permanence as wagons above. Also starts EMPTY, same reasoning.
+let harnessDeer: Tharnessdeer[] = []
 
 // enemy._id -> a per-bind counter, only used by the enemyBind handler below
 // (skill.enemyBind) - lets a second bind landing on an already-bound enemy
@@ -361,6 +363,16 @@ io.on("connection", (socket: Socket) => {
         const { pos, placeId, element } = data
         socket.broadcast.emit("circle-spawned", { pos, placeId, element })
     })
+    // SPEAR THROW - same "purely visual sync, no server state to touch"
+    // shape as spawncirc right above, and the exact same reason for
+    // socket.broadcast.emit over io.emit: client/src/charactersystem/
+    // uimanagement.js's throwSpearProjectile already spawns the thrower's
+    // OWN projectile locally before this ever fires, so io.emit would echo
+    // it right back and spawn a second overlapping spear on their own screen.
+    safeOn(socket, "throwspear", data => {
+        const { spawnPos, targetPos, parts, placeId } = data
+        socket.broadcast.emit("spear-thrown", { spawnPos, targetPos, parts, placeId })
+    })
     // EQUIPING
     safeOn(socket, "emitEquipItem", data =>{
         const {ownerId, itemName, itemModelStyle,  itemType, currentPlaceId} = data
@@ -462,6 +474,13 @@ io.on("connection", (socket: Socket) => {
         if(enemyTarg.hp <= 0) tcpEnemies = tcpEnemies.filter(enemy => enemy._id !== data.targetId)
         // }
         console.log(`enemy hp ${enemyTarg.hp} / ${enemyTarg.maxHp}`)
+        // {...data, ...} is what carries a hit weapon's own effectsWhenHit
+        // (client's characterstate.js dealDamageToEnemy, e.g. the Majestic
+        // Sword's burn - npcDetails.js item data) all the way back to every
+        // connected client's own enemyIsHit() (createEnemy.js), which is
+        // what actually starts the burn tick/particles - already just rides
+        // along for free with everything else in data, no explicit
+        // destructuring/whitelisting needed here.
         io.emit("enemy-is-hit", {...data, dmgToApply, hp: enemyTarg.hp, maxHp: enemyTarg.maxHp})
     })
     // skill.enemyBind (see client's skillsData.js radiantjudgmentSkill and
@@ -893,21 +912,60 @@ setInterval(() => {
     })
 }, ENEMY_QUOTA_CHECK_INTERVAL_MS)
 
+// Staggered startup spawn (openworld/placeId 888) - each WAGON_HEADINGS
+// entry appears one at a time (north immediately, then the next heading
+// WAGON_STARTUP_STAGGER_MS later, and so on) instead of all 4 popping into
+// existence in the same instant the server boots. Reuses createHarnessDeer/
+// createWagon - the exact same factories the quota-check interval right
+// below already calls to top up a missing heading later - rather than a
+// second hand-built "create them all" path that could drift out of sync.
+// Runs ONCE, at module load; the quota-check interval below is what keeps
+// these topped up ongoing (e.g. if this sequence gets interrupted by a
+// restart partway through staggering).
+//
+// wagonStaggerComplete gates the quota-check interval below until this
+// entire sequence has actually finished. Without it, WAGON_QUOTA_CHECK_INTERVAL_MS's
+// own first tick (10s) would fire WHILE this is still mid-stagger (the last
+// heading here can land as late as 3 * WAGON_STARTUP_STAGGER_MS = 15s), see
+// whichever headings haven't had their turn yet as "missing", and spawn
+// them immediately right then - defeating the stagger for exactly the
+// headings it was supposed to still be delaying.
+let wagonStaggerComplete = false
+const WAGON_STARTUP_STAGGER_MS = 5 * 1000
+const wagonHeadingEntries = Object.entries(WAGON_HEADINGS)
+wagonHeadingEntries.forEach(([headingName, heading], index) => {
+    setTimeout(() => {
+        const deer = createHarnessDeer(headingName, heading)
+        harnessDeer.push(deer)
+        wagons.push(createWagon(deer))
+        log(`[wagonStagger] spawned harness deer/wagon heading: ${headingName}`)
+        io.emit("harness-deer-spawned", harnessDeer)
+        io.emit("wagons-spawned", wagons)
+        if(index === wagonHeadingEntries.length - 1) wagonStaggerComplete = true
+    }, index * WAGON_STARTUP_STAGGER_MS)
+})
+
 // wagon quota top-up (openworld/placeId 888) - same "keep at least N of
 // these alive" shape as enemyLengthsInPlace's own quota check right above,
 // not a literal "spawn 4 more every 10s forever": recources/wagons.ts's own
 // wagons are permanent (no removal path exists at all, same as bonfires),
 // so in steady state this finds nothing missing and does nothing, every
-// tick, forever - it only actually creates anything the first time a
-// heading turns out to be missing (a fresh boot where startingWagons somehow
-// didn't seed, or this array got cleared some other way). This is what
-// actually explains "I don't see the wagons" if wagons was never populated
-// in the first place - restarting this server process is what makes the
-// FIRST tick of this pick that up; this interval alone can't fix a client
-// that's still holding an old cached bundle/socket connection from before
-// wagons existed at all, only a stale/empty wagons array on THIS process.
+// tick, forever - it only actually creates anything if a heading is
+// missing (the staggered startup sequence above hasn't reached it yet, got
+// interrupted by a restart, or this array got cleared some other way).
+// This is what actually explains "I don't see the wagons" if wagons was
+// never populated in the first place - restarting this server process is
+// what makes the FIRST tick of this pick that up; this interval alone
+// can't fix a client that's still holding an old cached bundle/socket
+// connection from before wagons existed at all, only a stale/empty wagons
+// array on THIS process.
 const WAGON_QUOTA_CHECK_INTERVAL_MS = 10 * 1000
 setInterval(() => {
+    // wait for the staggered startup sequence above to actually finish
+    // before this starts checking anything - see wagonStaggerComplete's
+    // own comment for why
+    if(!wagonStaggerComplete) return
+
     // deer is the primary entity now (recources/wagons.ts's own header
     // comment on why) - check ITS headings first, and spawn a paired
     // wagon for anything freshly created here
@@ -918,7 +976,7 @@ setInterval(() => {
         const newDeer = missingHeadings.map(headingName => createHarnessDeer(headingName, WAGON_HEADINGS[headingName]))
         harnessDeer.push(...newDeer)
         // a freshly topped-up deer needs its own wagon too, same 1:1
-        // pairing startingHarnessDeer/startingWagons already establish -
+        // pairing the staggered startup sequence above already establishes -
         // otherwise a deer that only ever exists because THIS check
         // created it would stay permanently cart-less
         wagons.push(...newDeer.map(createWagon))
