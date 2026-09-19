@@ -10,6 +10,7 @@ import startingQuests, { createSlaySlimesQuest, F_RANK_QUEST_COUNT } from "./rec
 import { generateSlimes, generateFireSlimes, generateElectricSlimes, generateMonoliths, generateDarkSlimes, generateLesserDemons } from "./generate-datas/genenemy"
 import { startingTreasures } from "./recources/treasures"
 import { createWagon, WAGON_HEADINGS, createHarnessDeer, Tharnessdeer, Twagon } from "./recources/wagons"
+import { Brain, ATTITUDE_PRESETS, RESTING_Y } from "./recources/npcBrain"
 
 export const enemyLengthsInPlace = [
     {   
@@ -132,6 +133,22 @@ type Tstruckweapon = {
 
 let players: Tplayers[] = []
 let gates: unknown[] = []
+// AI-controlled bot players (recources/npcBrain.ts's own Brain class) - see
+// the "BOT PLAYERS" block further down for the actual spawn/toggle logic.
+// Each bot's own Tplayers entry lives in `players` above like any real
+// player (that's what makes it render identically on every client - see
+// spawnBot's own comment) - this array is purely server-side bookkeeping so
+// a bot's own Brain instance (and its setInterval/setTimeout timers) can be
+// found and torn down later, keyed by the same `owner` id.
+let bots: { player: Tplayers, brain: Brain }[] = []
+let spawnBotsEnabled = false
+// client's sockets/botSensor.js's own periodic report - tcp has no idea
+// where trees/buildings/decorations are otherwise (all client-only scene
+// data). Keyed by placeId, always just the MOST RECENT report for that
+// place (not merged/accumulated across multiple reporters) - a report is
+// already a fresh full snapshot of what's near whichever real player sent
+// it, so replacing beats trying to merge stale + fresh entries together.
+let obstaclesByPlace: Record<number, { x: number, z: number, radius: number }[]> = {}
 
 let tcpEnemies = enemyArray
 let quests = startingQuests
@@ -192,6 +209,51 @@ function safeOn(socket: Socket, event: string, handler: (...args: any[]) => void
     })
 }
 
+// the ONE place enemy hp actually gets mutated - originally inline inside
+// the "enemyIsHit" socket handler below, pulled out so recources/npcBrain.ts's
+// own bot combat (BOT PLAYERS block further down) can deal REAL damage
+// through the exact same path a real player's own hit already does,
+// instead of a second, easy-to-drift-out-of-sync copy of this logic.
+// data shape matches whatever a real emitEnemyIsHit() call already sends
+// ({targetId, dmgDetails, playerId, currentPlaceId, isPhysical, ...}) - a
+// bot-dealt hit just builds that same shape with its own owner id as
+// playerId (see performBotAttack further down).
+function applyDamageToEnemy(data: any) {
+    const { targetId, dmgDetails } = data
+
+    const enemyTarg = tcpEnemies.find(ene => ene._id === targetId)
+    if(!enemyTarg){
+        // same shape "removeEnemy"'s own handler already broadcasts
+        // (io.emit("enemy-removed", enemyId) - a plain string) - this
+        // was an object instead ({targetId, currentPlaceId}), but the
+        // client's own "enemy-removed" listener always treats its
+        // payload as the bare id string (enmy._id === enemyId, and
+        // `enemy.${enemyId}` for the mesh-name lookup). An object
+        // compared with === against a string is always false, and
+        // interpolated into a template literal it stringifies to the
+        // literal text "enemy.[object Object]", which can never match
+        // any real mesh name - so this self-healing fallback (tell the
+        // client to clean up a ghost it's still holding onto, the
+        // moment the server confirms it doesn't actually exist) was
+        // silently never doing anything. Fixed by matching the one
+        // shape that already works everywhere else.
+        io.emit("enemy-removed", targetId)
+        return log("not found enemy to be damaged, told the client to clean up its own ghost - ", targetId)
+    }
+    const dmgToApply = dmgDetails.weaponDmg ? dmgDetails.weaponDmg : dmgDetails.physicalDmg
+    enemyTarg.hp -= dmgToApply
+    if(enemyTarg.hp <= 0) tcpEnemies = tcpEnemies.filter(enemy => enemy._id !== targetId)
+    console.log(`enemy hp ${enemyTarg.hp} / ${enemyTarg.maxHp}`)
+    // {...data, ...} is what carries a hit weapon's own effectsWhenHit
+    // (client's characterstate.js dealDamageToEnemy, e.g. the Majestic
+    // Sword's burn - npcDetails.js item data) all the way back to every
+    // connected client's own enemyIsHit() (createEnemy.js), which is
+    // what actually starts the burn tick/particles - already just rides
+    // along for free with everything else in data, no explicit
+    // destructuring/whitelisting needed here.
+    io.emit("enemy-is-hit", {...data, dmgToApply, hp: enemyTarg.hp, maxHp: enemyTarg.maxHp})
+}
+
 io.on("connection", (socket: Socket) => {
     safeOn(socket, "join-world", (data, callback) => {
         // join-world fires every time the client loads a new place, not just
@@ -227,6 +289,27 @@ io.on("connection", (socket: Socket) => {
             players, placesMD, tcpEnemies, quests,
             treasures, bonfires, wagons, harnessDeer, struckWeapons
         }) // always send the updated players count
+    })
+
+    // client's inputMovement.js "v" debug key - flips the module-level
+    // spawnBotsEnabled flag the BOT PLAYERS block's own setInterval (further
+    // down this file) checks every BOT_SPAWN_INTERVAL_MS. No payload/state
+    // to store per-player, so this is the simplest possible relay shape
+    // (compare emitCraftBonfire/emitRemoveTreasure above) - toggled by
+    // whichever connected client presses "v", affects every bot spawned
+    // from then on, not scoped to that one player.
+    safeOn(socket, "toggle-spawn-bots", () => {
+        spawnBotsEnabled = !spawnBotsEnabled
+        console.log(`[bots] spawning ${spawnBotsEnabled ? "ENABLED" : "disabled"}`)
+    })
+
+    // client's sockets/botSensor.js - see obstaclesByPlace's own comment
+    // above. Purely server-side bookkeeping, no broadcast - this data only
+    // ever feeds bot pathing, no other client needs to know about it.
+    safeOn(socket, "bot-obstacle-report", data => {
+        const { obstacles, currentPlaceId } = data
+        if(!Array.isArray(obstacles)) return
+        obstaclesByPlace[currentPlaceId] = obstacles
     })
 
     // client/src/components/campcraft.js's own craft flow already spawns
@@ -284,6 +367,7 @@ io.on("connection", (socket: Socket) => {
         if(!message || !message.trim()) return
         if(!players.find(uzr => uzr.owner === playerId)) return log(`no valid player ${playerId}`)
         io.emit("worldChatMessage", data)
+        console.log(data)
     })
 
     // MOVEMENTS
@@ -493,46 +577,7 @@ io.on("connection", (socket: Socket) => {
     })
 
     //enemy related
-    safeOn(socket, "enemyIsHit", data => {
-        const { targetId, dmgDetails } = data
-        // console.log(`${targetId} is hit with ${dmgDetails.weaponDmg ? dmgDetails.weaponDmg : dmgDetails.physicalDmg} damage`)
-        // log(data.dmgDetails)
-
-        const enemyTarg = tcpEnemies.find(ene => ene._id === targetId)
-        if(!enemyTarg){
-            // same shape "removeEnemy"'s own handler already broadcasts
-            // (io.emit("enemy-removed", enemyId) - a plain string) - this
-            // was an object instead ({targetId, currentPlaceId}), but the
-            // client's own "enemy-removed" listener always treats its
-            // payload as the bare id string (enmy._id === enemyId, and
-            // `enemy.${enemyId}` for the mesh-name lookup). An object
-            // compared with === against a string is always false, and
-            // interpolated into a template literal it stringifies to the
-            // literal text "enemy.[object Object]", which can never match
-            // any real mesh name - so this self-healing fallback (tell the
-            // client to clean up a ghost it's still holding onto, the
-            // moment the server confirms it doesn't actually exist) was
-            // silently never doing anything. Fixed by matching the one
-            // shape that already works everywhere else.
-            io.emit("enemy-removed", targetId)
-            return log("not found enemy to be damaged, told the client to clean up its own ghost - ", targetId)
-        }
-        // if(!data.isMissed){
-        // enemyTarg.hp -= data.hasWeapon ? data.dmgDetails.weaponDmg : data.dmgDetails.physicalDmg
-        const dmgToApply = data.dmgDetails.weaponDmg ? data.dmgDetails.weaponDmg : data.dmgDetails.physicalDmg
-        enemyTarg.hp -= dmgToApply
-        if(enemyTarg.hp <= 0) tcpEnemies = tcpEnemies.filter(enemy => enemy._id !== data.targetId)
-        // }
-        console.log(`enemy hp ${enemyTarg.hp} / ${enemyTarg.maxHp}`)
-        // {...data, ...} is what carries a hit weapon's own effectsWhenHit
-        // (client's characterstate.js dealDamageToEnemy, e.g. the Majestic
-        // Sword's burn - npcDetails.js item data) all the way back to every
-        // connected client's own enemyIsHit() (createEnemy.js), which is
-        // what actually starts the burn tick/particles - already just rides
-        // along for free with everything else in data, no explicit
-        // destructuring/whitelisting needed here.
-        io.emit("enemy-is-hit", {...data, dmgToApply, hp: enemyTarg.hp, maxHp: enemyTarg.maxHp})
-    })
+    safeOn(socket, "enemyIsHit", data => applyDamageToEnemy(data))
     // skill.enemyBind (see client's skillsData.js radiantjudgmentSkill and
     // skillEffects.js's hit handler) - bindChance was already rolled
     // client-side before this ever fires (this server never sees a miss,
@@ -844,6 +889,214 @@ setInterval(() => {
         io.emit("enemy-wander", { _id: enem._id, currentPlaceId: enem.currentPlaceId, x: destX, z: destZ })
     })
 }, WANDER_INTERVAL_MS)
+
+// BOT PLAYERS - AI-controlled fake players (recources/npcBrain.ts's own
+// Brain class), built to be indistinguishable from a real logged-in player
+// to every other connected client. The trick is that nothing client-side
+// needs to know a bot even exists: a bot gets pushed into `players` (the
+// exact same array a real "join-world" push goes into) and gets its own
+// "userJoined" broadcast (the exact same event/payload shape join-world's
+// own handler above already sends) - so worldsocket.js's reCreateMeshesInScene
+// picks it up and renders it via createCharacter() same as any real player.
+// Movement afterward reuses "emitted-moving"/"stopped" (the exact events a
+// real player's own emitmove/emitStop server handlers already broadcast) -
+// so no new client-side code was needed anywhere for a bot to walk/run
+// around convincingly. See this project's own package.json for the new
+// "yuka" dependency (recources/npcBrain.ts) - a small, dependency-free game-
+// AI library used for the actual per-tick movement (steering/arrive), not
+// reimplemented here.
+const MAX_BOTS = 20 // safety cap - "spawn one every 5s forever" would otherwise never stop
+const BOT_SPAWN_INTERVAL_MS = 5000
+// one candidate place per entry - spawnBot() below picks one at random
+// each tick, so bots gradually populate every listed place instead of only
+// ever the first one. openworld's center is OPENWORLD_SLIME_TERRITORY's own
+// (0, 500) (enemyDetails.ts), also the player's own openworld spawn point.
+// village (placeId 1) has no equivalent server-known "center" constant
+// anywhere (real players' own spawn position is authored client-side, in
+// localroomdb.js, which tcp has no access to) - (0,0) with a tighter 20-unit
+// radius is a reasonable village-sized guess, smaller than openworld's 40
+// since a village is a much more tightly-built space (buildings/fences) a
+// wide roam radius could wander a bot into.
+const BOT_SPAWN_PLACES = [
+    { placeId: 1, name: "village", areaType: "village", center: { x: 0, z: 0 }, radius: 20 },
+    { placeId: 888, name: "openworld", areaType: "openworld", center: { x: 0, z: 500 }, radius: 40 },
+]
+
+// MAX_BOTS-or-more entries on purpose (see pickBotName below) - with only
+// 10 names and up to 20 bots alive at once, duplicates were near-guaranteed
+// (confirmed from an actual screenshot: two different bots both named
+// "Marrow" joined back to back, unreadable in world chat).
+const BOT_NAMES = [
+    "Wren", "Talon", "Brisk", "Marrow", "Ashen", "Fennick", "Corvid", "Dusk", "Bramble", "Quill",
+    "Hollis", "Thistle", "Rowan", "Grael", "Nyx", "Fenwick", "Orin", "Larkin", "Sylas", "Brakk",
+]
+// known-good values, pulled straight off real npcDetails.js entries that
+// already render correctly today - NOT the full set of everything that
+// exists, just a safe pool guaranteed not to 404 a missing mesh/texture.
+// gender is always "male" on purpose: createcharacterpage.js's own comment
+// confirms female has no cloth/pants styles yet, so a female bot would be
+// stuck half-dressed - not worth the risk for a cosmetic randomization.
+const BOT_HAIR = ["hair1", "hair2", "style1", "style2"]
+const BOT_CLOTH = ["style1", "style2", "style3"]
+const BOT_PANTS = ["style1", "style2"]
+const BOT_BOOTS = ["style1", "style2"]
+const BOT_SKIN = ["skin1", "skin2", "skin3", "skin4"]
+// {r,g,b} 0-1 floats, same shape/range client/src/constants/adventurerColors.js's
+// own ADVENTURER_COLORS palette already uses (a small hand-picked subset of
+// it, not imported directly - tcp is a separate node project from client,
+// no shared module between them)
+const BOT_COLORS = [
+    { r: 0, g: 0, b: 0 },
+    { r: 0.5, g: 0.5, b: 0.5 },
+    { r: 0.22, g: 0.13, b: 0.05 },
+    { r: 0.3, g: 0.2, b: 0.1 },
+    { r: 0.15, g: 0.15, b: 0.15 },
+    { r: 0.42, g: 0.30, b: 0.16 },
+]
+const pickOne = <T>(arr: T[]): T => arr[Math.floor(Math.random() * arr.length)]
+
+// picks a name no CURRENTLY ALIVE bot is already using - plain pickOne(BOT_NAMES)
+// let two different bots both land on "Marrow" (confirmed from an actual
+// screenshot), unreadable in world chat/nametags with no way to tell them
+// apart. Falls back to a random pick + numeric suffix only if every name in
+// the pool is already taken (BOT_NAMES has MAX_BOTS entries, so this should
+// never actually trigger, just a safety net if that ever changes).
+function pickBotName(): string {
+    const taken = new Set(bots.map(b => b.player.name))
+    const free = BOT_NAMES.filter(n => !taken.has(n))
+    if(free.length) return pickOne(free)
+    return `${pickOne(BOT_NAMES)} ${randNumString().slice(0, 2)}`
+}
+
+function spawnBot() {
+    if (bots.length >= MAX_BOTS) return
+
+    const owner = `bot_${randNumString()}`
+    const attitudeNames = Object.keys(ATTITUDE_PRESETS)
+    const attitude = ATTITUDE_PRESETS[pickOne(attitudeNames)]
+
+    const place = pickOne(BOT_SPAWN_PLACES)
+    const angle = Math.random() * Math.PI * 2
+    const dist = Math.random() * place.radius
+    const spawnX = place.center.x + Math.cos(angle) * dist
+    const spawnZ = place.center.z + Math.sin(angle) * dist
+
+    // same shape/fields a real join-world push builds (see that handler
+    // above) - items/skills empty is deliberate for this movement-only
+    // phase (no weapon data needed yet, "attacking later" per spec), so
+    // hasWeapon correctly comes out false the same way a real unarmed
+    // player's own join would compute it
+    const botPlayer: Tplayers = {
+        socketId: `bot-socket-${owner}`,
+        owner,
+        name: pickBotName(),
+        lvl: 1,
+        gender: "male",
+        cloth: pickOne(BOT_CLOTH),
+        pants: pickOne(BOT_PANTS),
+        hair: pickOne(BOT_HAIR),
+        boots: pickOne(BOT_BOOTS),
+        clothColor: pickOne(BOT_COLORS) as any,
+        pantsColor: pickOne(BOT_COLORS) as any,
+        hairColor: pickOne(BOT_COLORS) as any,
+        skinColor: pickOne(BOT_SKIN),
+        race: "human",
+        currentPlace: { placeId: place.placeId, name: place.name, areaType: place.areaType },
+        _moving: false,
+        _minning: false,
+        _attacking: false,
+        mode: "idle",
+        pos: { x: spawnX, y: RESTING_Y, z: spawnZ },
+        dirTarg: { x: spawnX, y: 0, z: spawnZ + 1 },
+        items: [],
+        skills: [],
+        hasWeapon: false,
+        weaponBlocking: false,
+        magicBlocking: false,
+        IsInVulnerable: false,
+    }
+
+    players.push(botPlayer)
+
+    const brain = new Brain(attitude, { x: spawnX, z: spawnZ }, (pos, dirTarg, mode, moving) => {
+        botPlayer.pos = pos
+        botPlayer.dirTarg = dirTarg
+        botPlayer.mode = mode
+        botPlayer._moving = moving
+        // same event NAME/PAYLOAD SHAPE a real player's own "emitmove"/
+        // "emitStop" server handlers already broadcast - every connected
+        // client's worldsocket.js already knows exactly how to apply
+        // these (snap position, look at dirTarg, switch mode), no bot-
+        // aware branch needed anywhere client-side
+        io.emit(moving ? "emitted-moving" : "stopped", { ownerId: owner, pos, dirTarg, mode })
+    }, {
+        // tcpEnemies' own x/z is only refreshed at specific moments (an
+        // attack/skill-cast/teleport landing - see enemyWillAttack et al
+        // above), NOT continuously while an enemy is simply chasing someone
+        // else - so a bot's own view of "where is that enemy right now" can
+        // be up to a few seconds stale for an enemy mid-chase. Re-queried
+        // fresh every COMBAT_CHECK_MS (npcBrain.ts) rather than cached, so
+        // it self-corrects the moment any newer position lands, and is
+        // close enough in practice for a bot to walk into range and fight -
+        // not pixel-precise tracking, just "good enough to find and reach it".
+        getNearbyEnemies: (x, z, radius) => {
+            const radiusSq = radius * radius
+            return tcpEnemies
+                .filter(enem => enem.currentPlaceId === botPlayer.currentPlace.placeId && !enem._disabled)
+                .filter(enem => ((enem.x - x) ** 2 + (enem.z - z) ** 2) <= radiusSq)
+                .map(enem => ({ _id: enem._id, x: enem.x, z: enem.z, hp: enem.hp }))
+        },
+        // same applyDamageToEnemy() every real player's own "enemyIsHit"
+        // handler already goes through (see that function's own header
+        // comment) - a bot-dealt hit is real, server-tracked damage that
+        // can actually kill the enemy, visible/consistent for every
+        // connected client, not a bot-only illusion
+        dealDamage: (targetId, dmgDetails) => {
+            applyDamageToEnemy({
+                targetId,
+                dmgDetails,
+                playerId: owner,
+                currentPlaceId: botPlayer.currentPlace.placeId,
+                isPhysical: true,
+            })
+        },
+    })
+
+    bots.push({ player: botPlayer, brain })
+
+    // same broadcast shape join-world's own handler sends above - a bot
+    // "joining" has to look identical to a real one for every connected
+    // client's reCreateMeshesInScene to pick it up and render it through
+    // the exact same createCharacter() path. isBot:true is the one extra
+    // field a real join never sends - worldsocket.js's own "userJoined"
+    // handler uses it to world-chat-announce a bot spawn ("Name has
+    // joined") without also doing that for a real player's own join-world
+    // (which fires on every PLACE CHANGE too, not just first login - that
+    // would announce every door a real player walks through).
+    io.emit("userJoined", {
+        currentPlaceId: botPlayer.currentPlace.placeId, newPlayerName: botPlayer.name, isBot: true,
+        players, placesMD, tcpEnemies, quests,
+        treasures, bonfires, wagons, harnessDeer, struckWeapons,
+    })
+}
+
+setInterval(() => {
+    if (!spawnBotsEnabled) return
+    spawnBot()
+}, BOT_SPAWN_INTERVAL_MS)
+
+// pushes each live bot's own place's latest obstaclesByPlace snapshot into
+// its Brain - a bit slower than botSensor.js's own 4s report cadence, no
+// need to sync more often than the underlying data actually changes.
+// bots.length && guards the (very cheap either way) no-op case of nobody
+// having spawned any bots yet.
+const OBSTACLE_SYNC_INTERVAL_MS = 5000
+setInterval(() => {
+    if(!bots.length) return
+    bots.forEach(({ player, brain }) => {
+        brain.updateObstacles(obstaclesByPlace[player.currentPlace.placeId] ?? [])
+    })
+}, OBSTACLE_SYNC_INTERVAL_MS)
 
 // dynamic slime spawning (openworld, placeId 888) - tops territory back up
 // near whichever players actually wander into an empty pocket of it,
