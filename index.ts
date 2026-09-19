@@ -900,6 +900,19 @@ setInterval(() => {
         const destX = origin.x + Math.cos(angle) * radius
         const destZ = origin.z + Math.sin(angle) * radius
 
+        // every OTHER position-changing event in this file (enemyWillAttack
+        // etc.) writes its new x/z straight onto the tcpEnemies entry right
+        // alongside its own broadcast - this was the one spot that only
+        // ever told CLIENTS where the enemy is walking to, leaving the
+        // server's own copy frozen whenever no one has fought it recently
+        // (getNearestEnemy/getNearbyEnemies below read straight off this
+        // same enem.x/z - a bot hunting a wild, never-yet-aggroed enemy was
+        // walking to and facing wherever it spawned/last attacked from, not
+        // where it actually currently is, confirmed from actual screenshots
+        // of bots aimed at empty ground the enemy had long since wandered
+        // away from)
+        enem.x = destX
+        enem.z = destZ
         io.emit("enemy-wander", { _id: enem._id, currentPlaceId: enem.currentPlaceId, x: destX, z: destZ })
     })
 }, WANDER_INTERVAL_MS)
@@ -998,6 +1011,96 @@ const BOT_COLORS = [
     { r: 0.42, g: 0.30, b: 0.16 },
 ]
 const pickOne = <T>(arr: T[]): T => arr[Math.floor(Math.random() * arr.length)]
+
+// BOT SKILL VISUALS - close-distance ("melee") bots get dashstrikeSkill's
+// own signature move, long-distance ("caster") bots get a real projectile
+// cast instead of silently landing CAST_DMG with nothing visible. Both ride
+// the exact same "skillactivated" relay a real player's own skillsui.js
+// click emits (tcp/index.ts's own "activate-skill" handler above just
+// rebroadcasts whatever it's handed, unchanged) - every connected client's
+// attackingSystem.js activateSkill() dispatches on skill.effects' own
+// effectType exactly like a real cast, so this needs no new client code at
+// all. Hand-copied field-for-field from client/src/staticRecources/
+// skillsData.js's own dashstrikeSkill/singlecastSkill (tcp is a separate
+// node project, no shared import between them - same reasoning BOT_SWORDS'
+// own comment gives) - only the fields those two skills' own cast paths
+// (castDashSkill/castOffenseSkill, both in client/src/creations/
+// skillEffects.js) actually read, trimmed of real-player-only bookkeeping
+// (slotNumber, pointsToClaim/pointsForUpgrade, evolution, upgradePlus, desc).
+//
+// Every hit-detection/damage-application branch inside both cast functions
+// is isCaster-gated (`charState.owner === getCharState()?.owner`) - since
+// no real client's own local charState.owner is EVER a bot's `bot_<id>`
+// owner string, that gate never once passes on any connected screen. Every
+// client still plays the identical animation/circle/projectile/sound (that
+// part runs ungated, before the isCaster check), but not one of them ever
+// applies real damage from it - tcp's own dealDamage callback below stays
+// the sole source of truth for that, via the same applyDamageToEnemy()
+// every real player's own hit already goes through. Exactly the same
+// "safe to broadcast a real skill cast for a caster with no client of its
+// own" trick "player-attacked" already relies on for a bot's plain swing.
+const BOT_DASH_SKILL = {
+    name: "dashstrike",
+    // attackingSystem.js's activateSkill() switch only actually runs
+    // castDashSkill/castOffenseSkill when skillDetail.isActive is true -
+    // real players get this set by skillsui.js's own click handler right
+    // before it emits "activate-skill" (skill.isActive = willActivate),
+    // which a hand-built object here has no equivalent of, so it has to be
+    // baked in directly or the whole cast silently no-ops on every client
+    isActive: true,
+    lvl: 1,
+    element: "normal",
+    castDuration: 0,
+    demand: [],
+    effects: [
+        { effectType: "dash", dmgPm: 0, plusDmg: 90, chance: 1, bashPower: 0.5 },
+        { effectType: "critical", criticalPercent: 0.4 },
+    ],
+    dash: { distance: 6, impulseForce: 120, durationMs: 350 },
+    animationName: "dashstrike",
+    activationSound: { soundType: "blade", willPlayAfterSeconds: 200 },
+    impactSound: "struckS",
+    explosionColor: "red",
+    explosionScale: 1,
+    projectileVisual: { useProjectile: false },
+}
+// how long the client-side "bot-dashing" lunge (see the melee branch of
+// dealDamage below) actually takes to cover BOT_DASH_SKILL.dash.distance -
+// deliberately NOT that skill's own dash.durationMs (350, tuned for a REAL
+// player's physics impulse). client/src/npc/duelSystem.js's own
+// performOpponentDashStrike hit this exact same problem for its dashstrike-
+// using npcFighters (also no physics body, just a locallyTranslate ramp)
+// and found 350ms "read as barely moving at all" once nothing else was
+// competing for control of the body's position - a full second is what
+// that file's own comment says actually reads as a real lunge. Distance (6)
+// over 1000ms works out to roughly 6x this bot's own BOT_WALK_SPEED (1) -
+// a fast, obvious dash, not a subtle nudge.
+const BOT_DASH_MOVE_DURATION_MS = 1000
+// singlecastSkill's own "particle" shape - the simplest/safest of every
+// offense skill's projectile styles to hand-copy (createParticleSystem only
+// ever reads skill.particleStyles/skill.name, nothing exotic like a weapon-
+// part assembly or a GLB model that could silently fail to resolve)
+const BOT_CAST_SKILL = {
+    name: "singlecast",
+    // see BOT_DASH_SKILL's own comment just above - same requirement
+    isActive: true,
+    lvl: 1,
+    element: "normal",
+    castDuration: 3,
+    demand: [],
+    effects: [{ effectType: "offense", dmgPm: 0, plusCasterMagicDmg: 0.6, plusDmg: 100, chance: 1, bashPower: 0.5 }],
+    explosionColor: "blue",
+    explosionScale: 1,
+    particleStyles: [{ name: "oneline", color: "blue" }],
+    projectileVisual: { useProjectile: true, visible: true, shape: "particle", material: { kind: "none" } },
+    onHitVisual: [{ type: "burst", burst: { texture: "drunkBubble", fireScale: 0.9, smokeScale: 0.7, emberEmitRate: 11, gravitySign: 1, includeSmoke: true } }],
+}
+// casterStats only ever feeds the isCaster-gated damage math inside
+// castOffenseSkill (see BOT_CAST_SKILL's own comment on why that never
+// actually runs for a bot) - same default new-character shape server/
+// routes/characterR.js hands a real fresh character, just so nothing
+// downstream reads an unexpected undefined field
+const BOT_CASTER_STATS = { weapon: 1, accuracy: 1, critical: 1, dex: 1, strength: 1, magic: 1, spd: 3.4, atkSpd: 0.9 }
 
 // picks a name no CURRENTLY ALIVE bot is already using - plain pickOne(BOT_NAMES)
 // let two different bots both land on "Marrow" (confirmed from an actual
@@ -1170,13 +1273,18 @@ function spawnBot() {
         // can actually kill the enemy, visible/consistent for every
         // connected client, not a bot-only illusion
         dealDamage: (targetId, dmgDetails) => {
-            applyDamageToEnemy({
-                targetId,
-                dmgDetails,
-                playerId: owner,
-                currentPlaceId: botPlayer.currentPlace.placeId,
-                isPhysical: true,
-            })
+            // real numbers instead of re-reading the code and asserting
+            // it's correct - own position, own facing (already refreshed by
+            // checkCombat's own onMove call THIS exact tick, before this
+            // callback ever runs), and the actual target's own live x/z,
+            // all printed at the exact moment an attack fires. Compare
+            // botDirTarg-botPos (the direction actually broadcast) against
+            // targetPos-botPos (where the target actually was) - if those
+            // two vectors don't point the same way, the bug is server-side
+            // and this proves it; if they DO match but the client still
+            // renders it facing elsewhere, the bug is purely client-side.
+            const liveTarget = tcpEnemies.find(enem => enem._id === targetId)
+            log(`[botAim] ${owner} pos=(${botPlayer.pos.x.toFixed(2)},${botPlayer.pos.z.toFixed(2)}) dirTarg=(${botPlayer.dirTarg.x.toFixed(2)},${botPlayer.dirTarg.z.toFixed(2)}) target=${targetId} targetPos=(${liveTarget?.x.toFixed(2)},${liveTarget?.z.toFixed(2)})`)
 
             // an enemy with no target yet doesn't otherwise notice a bot at
             // all (see registerTargetIfNone's own header comment - a bot
@@ -1186,38 +1294,152 @@ function spawnBot() {
             // this enemy up close" - won't steal a target away from
             // whoever the enemy is already fighting, same guard the real
             // player path already enforces.
-            registerTargetIfNone(targetId, owner, botPlayer.pos)
+            const landHit = () => {
+                applyDamageToEnemy({
+                    targetId,
+                    dmgDetails,
+                    playerId: owner,
+                    currentPlaceId: botPlayer.currentPlace.placeId,
+                    isPhysical: attitude.weapon > 0.5,
+                })
+                registerTargetIfNone(targetId, owner, botPlayer.pos)
+            }
 
-            // visible swing animation - same "player-attacked" broadcast a
-            // real melee swing already produces (client/src/charactersystem/
-            // attackingSystem.js's own attack() function plays whatever
-            // animName rides along, on EVERY connected client watching, not
-            // just locally) - reusing it here is what actually makes a bot
-            // look like it's swinging instead of just standing in a
-            // "fighting" stance while damage silently lands. Melee-style
-            // bots only (attitude.weapon > 0.5 - same threshold
-            // npcBrain.ts's own isMeleeStyle() uses, must stay in sync) - a
-            // caster-leaning bot hits from range without touching the
-            // enemy at all, a sword/spear swing wouldn't make sense there.
+            // Melee-style bots (attitude.weapon > 0.5 - same threshold
+            // npcBrain.ts's own isMeleeStyle() uses, must stay in sync) get
+            // dashstrikeSkill as their signature close-distance move;
+            // everyone else gets a real long-distance projectile cast
+            // instead of silently landing CAST_DMG with nothing visible -
+            // see BOT_DASH_SKILL/BOT_CAST_SKILL's own header comment for why
+            // broadcasting a real "skillactivated" cast for a bot is safe
+            // (never actually double-applies damage on any client).
             if(attitude.weapon > 0.5){
+                // createcharacter.js only ever parents the sword mesh onto
+                // rHand if mode==="fighting" AT CREATION TIME (see its own
+                // det.items.forEach block) - every bot spawns with mode
+                // "idle", so its sword starts sheathed on weaponSocket.
+                // Read once here so every branch below (normal swing AND
+                // dashstrike) shares the exact same equipped weapon.
                 const equippedWeapon = botItems.find(itm => itm.itemType === "weapon" && itm.equiped)
                 const weaponType = equippedWeapon?.weaponType ?? "sword"
-                const animPool = weaponType === "spear" ? ["spearattack1", "spearattack2"] : ["swordattack1", "swordattack2"]
-                io.emit("player-attacked", {
-                    owner,
-                    pos: botPlayer.pos,
-                    dirTarg: botPlayer.dirTarg,
-                    dmgDetails: { physicalDmg: dmgDetails.physicalDmg, weaponDmg: dmgDetails.weaponDmg, magicDmg: 0, accuracy: 1 },
-                    hasWeapon: equippedWeapon?.name ?? false,
-                    isMissed: false,
-                    weaponType,
+
+                // dashstrike as a rare flourish, not the bot's every swing -
+                // per spec, only a ~20% roll (Math.random() > 0.8) actually
+                // fires it; the other ~80% is just a plain sword/spear swing,
+                // same "player-attacked" broadcast a real melee swing already
+                // produces (attackingSystem.js's attack() plays whatever
+                // animName rides along, AND re-parents the sword onto rHand
+                // itself via its own equipSword(hasWeapon, true) call - no
+                // separate re-equip step needed on this path, unlike dashstrike's).
+                if(Math.random() > 0.8){
+                    io.emit("skillactivated", {
+                        ownerId: owner,
+                        // per-bot-unique name (skillEffects.js's pendingCasts is
+                        // keyed by this string alone, shared across EVERY
+                        // caster it ever sees - see BOT_CAST_SKILL's own
+                        // comment below for why the literal shared name is
+                        // unsafe here) - dashstrike has no pendingCasts entry
+                        // of its own (castDuration:0, nothing to track), so
+                        // this isn't load-bearing for melee bots today, just
+                        // consistent/future-proof against that ever changing
+                        skill: { ...BOT_DASH_SKILL, name: `${BOT_DASH_SKILL.name}_${owner}` },
+                        currentPlaceId: botPlayer.currentPlace.placeId,
+                        casterStats: BOT_CASTER_STATS,
+                        // re-faces the caster ONE more time, client-side, in the
+                        // exact same synchronous "skillactivated" handler that's
+                        // about to read the body's facing to aim the cast - see
+                        // that handler's own comment for why this closes a real
+                        // gap the separate, earlier "bot-stopped" broadcast
+                        // (which already set this same dirTarg) left open
+                        dirTarg: botPlayer.dirTarg,
+                    })
+                    // dashstrikeSkill's own real castDashSkill is entirely
+                    // PLAYER-shaped (physics impulse/isCaster-gated), which is
+                    // why it never visibly moves a bot on anyone's screen - same
+                    // reason client/src/npc/duelSystem.js's own dashstrike-using
+                    // npcFighters don't reuse it either, and instead run their
+                    // OWN dedicated locallyTranslate ramp (performOpponentDashStrike).
+                    // "bot-dashing" is that same idea, broadcast so every
+                    // client's own renderer.js can run that exact ramp locally
+                    // against this bot's body - see BOT_DASH_MOVE_DURATION_MS's
+                    // own comment for why 1000ms (not dashstrikeSkill's own
+                    // 350ms) is what actually reads as a real lunge.
+                    io.emit("bot-dashing", {
+                        ownerId: owner,
+                        distance: BOT_DASH_SKILL.dash.distance,
+                        durationMs: BOT_DASH_MOVE_DURATION_MS,
+                        // real weapon data (same fields createcharacter.js's own
+                        // det.items.forEach block reads at creation time) so the
+                        // client's own "bot-dashing" handler can re-parent the
+                        // ALREADY-CREATED sword mesh onto rHand, same as a real
+                        // player's attack() call already does on every swing
+                        weaponName: equippedWeapon?.name,
+                        parts: equippedWeapon?.parts,
+                        weaponType: equippedWeapon?.weaponType,
+                        metalColor: equippedWeapon?.metalColor,
+                    })
+                    // damage lands once the dash has had time to actually reach
+                    // the target, same reasoning performOpponentDashStrike's own
+                    // delayed hit gives (duelSystem.js) - instant would land
+                    // before the lunge itself has even visibly finished
+                    setTimeout(landHit, BOT_DASH_MOVE_DURATION_MS)
+                } else {
+                    const animPool = weaponType === "spear" ? ["spearattack1", "spearattack2"] : ["swordattack1", "swordattack2"]
+                    io.emit("player-attacked", {
+                        owner,
+                        pos: botPlayer.pos,
+                        dirTarg: botPlayer.dirTarg,
+                        dmgDetails: { physicalDmg: dmgDetails.physicalDmg, weaponDmg: dmgDetails.weaponDmg, magicDmg: 0, accuracy: 1 },
+                        hasWeapon: equippedWeapon?.name ?? false,
+                        isMissed: false,
+                        weaponType,
+                        currentPlaceId: botPlayer.currentPlace.placeId,
+                        atkSpd: 0.2,
+                        animName: pickOne(animPool),
+                    })
+                    landHit()
+                }
+            } else {
+                io.emit("skillactivated", {
+                    ownerId: owner,
+                    // MUST be unique per bot, not the shared literal
+                    // "singlecast" - castOffenseSkill's own
+                    // cancelPendingCast(skill.name) call cancels whatever
+                    // OTHER cast (any caster, bot or real player) currently
+                    // owns that exact name in skillEffects.js's pendingCasts
+                    // map (keyed by name alone, see its own header comment -
+                    // built for one player's own multiple DIFFERENT skills
+                    // staying pending at once, never for two DIFFERENT
+                    // casters sharing one identical name). With every
+                    // caster bot sending the literal "singlecast", any two
+                    // whose 3-second cast windows overlapped were silently
+                    // cancelling each other's still-charging cast before
+                    // its bolt ever fired - confirmed from an actual
+                    // screenshot (several magic circles blooming with none
+                    // of them clearly landing a correctly-aimed shot).
+                    // Nothing else keys off the literal name (every cast
+                    // dispatch/visual reads skill.effects/projectileVisual,
+                    // not skill.name), so suffixing it is fully safe.
+                    skill: { ...BOT_CAST_SKILL, name: `${BOT_CAST_SKILL.name}_${owner}` },
                     currentPlaceId: botPlayer.currentPlace.placeId,
-                    atkSpd: 0.2,
-                    animName: pickOne(animPool),
+                    casterStats: BOT_CASTER_STATS,
+                    // see the melee branch's own identical field above - same
+                    // "re-face right before this exact cast reads the body's
+                    // rotation" fix, same reasoning
+                    dirTarg: botPlayer.dirTarg,
                 })
+                // BOT_CAST_SKILL.castDuration (seconds) is how long every
+                // client's own castOffenseSkill sits on the magic circle
+                // before it actually looses the bolt - landing the real
+                // damage on that same delay (instead of instantly, like
+                // melee above) is what keeps the enemy's hp bar dropping
+                // roughly in sync with the bolt's own visible impact
+                // instead of several seconds before any client even shows
+                // an explosion
+                setTimeout(landHit, BOT_CAST_SKILL.castDuration * 1000)
             }
         },
-    })
+    }, botItems.some(itm => itm.itemType === "weapon" && itm.equiped))
 
     bots.push({ player: botPlayer, brain })
 

@@ -205,6 +205,16 @@ export class Brain {
     private moveArriveRadius = ARRIVE_RADIUS
     private onMove: BotMoveCallback
     private combat: CombatContext
+    // real players get gated off dashstrikeSkill's own requiresWeapon flag
+    // (skillsui.js's click handler, "equip a weapon to use this") before
+    // they're ever allowed to fire it - isMeleeStyle() below enforces that
+    // exact same rule for a bot, rather than just trusting attitude.weapon
+    // alone. Every bot happens to always have one today (spawnBot's own
+    // buildBotItems() call is unconditional), so this can't actually go
+    // false right now - it's here so that stays a real, enforced rule
+    // instead of an assumption a future change (a disarm mechanic, an
+    // attitude-based loadout) could silently break.
+    private hasWeapon: boolean
     private combatTargetId: string | null = null
     private lastAttackAt = 0
     private decisionTimer: ReturnType<typeof setTimeout> | null = null
@@ -212,11 +222,12 @@ export class Brain {
     private combatTimer: ReturnType<typeof setInterval> | null = null
     private lastTickAt = Date.now()
 
-    constructor(attitude: Attitude, spawnPos: { x: number, z: number }, onMove: BotMoveCallback, combat: CombatContext){
+    constructor(attitude: Attitude, spawnPos: { x: number, z: number }, onMove: BotMoveCallback, combat: CombatContext, hasWeapon: boolean){
         this.attitude = attitude
         this.homeAnchor = { ...spawnPos }
         this.onMove = onMove
         this.combat = combat
+        this.hasWeapon = hasWeapon
 
         this.vehicle = new Vehicle()
         this.vehicle.position.set(spawnPos.x, 0, spawnPos.z)
@@ -260,9 +271,13 @@ export class Brain {
     }
 
     // weapon-heavy attitude fights up close, everyone else prefers range -
-    // same threshold pickWanderTarget's own isPurposeful check already uses
+    // same threshold pickWanderTarget's own isPurposeful check already uses.
+    // Gated on hasWeapon too (see that field's own comment) - a
+    // weapon-attituded bot that somehow ended up with none falls back to
+    // fighting at CAST_RANGE instead of trying to dashstrike bare-handed,
+    // same as a real player would just be refused the click entirely.
     private isMeleeStyle(){
-        return this.attitude.weapon > 0.5
+        return this.attitude.weapon > 0.5 && this.hasWeapon
     }
 
     // re-evaluated every COMBAT_CHECK_MS, independent of think()'s own
