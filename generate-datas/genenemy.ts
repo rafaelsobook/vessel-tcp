@@ -35,7 +35,16 @@ const slimeBase = {
         { effectType: 'spdrain', chance: 10, permanent: false, dn: 'SP Drained', spcost: 20, hpcost: 0, mpcost: 0, hungercost: 4, energycost: 0 },
     ],
     titles: ['slime'],
-    skills: [],
+    // tidalspikeSkill (client/src/staticRecources/skillsData.js) - element
+    // "water", skillrank:1 ("Elite Skill"), same tier/stat shape
+    // fireSlimeBase's own flamebrand and electricSlimeBase's own
+    // lightningbolt already sit at (castDuration:2, skillCoolDown:1500, mp
+    // demand:15, plusDmg:70) - waterslime was the only one of the four
+    // slime variants with no skill at all until now. canDodge:true to match
+    // (client/src/enemies/createEnemy.js's own dodge-detection interval
+    // gates on this flag, same as the other three).
+    skills: ['tidalspike'],
+    canDodge: true,
     aptitude: ['water'],
     blessings: [],
     status: [],
@@ -239,6 +248,13 @@ const monolithBase = {
 const deerBase = {
     canDodge: true,
     elementType: "none",
+    // elemental weakness (client's creations/skillEffects.js's own
+    // getElementDamageMultiplier reads this off det.weakness) - a player
+    // skill whose own element matches this deals bonus damage. Not the
+    // same field as elementType above (that one's purely cosmetic - which
+    // SLIME_ELEMENT_COLORS palette a slime's shared material uses,
+    // client's enemies/skins.js - deer don't even use that material).
+    weakness: "fire",
     maxDistance: 0.7,
     modelStyle: "deer",
     stats: {

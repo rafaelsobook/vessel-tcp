@@ -5,7 +5,7 @@ import { Server, Socket } from "socket.io"
 import { randNumString, randNum } from "./tools/tools"
 
 import { placesMD } from "./placedetails/places"
-import enemyArray, { OPENWORLD_SLIME_TERRITORY } from "./recources/enemyDetails"
+import enemyArray, { OPENWORLD_SLIME_TERRITORY, OPENWORLD_ENEMY_BANDS } from "./recources/enemyDetails"
 import startingQuests, { createSlaySlimesQuest, F_RANK_QUEST_COUNT } from "./recources/quests"
 import { generateSlimes, generateFireSlimes, generateElectricSlimes, generateMonoliths, generateDarkSlimes, generateLesserDemons } from "./generate-datas/genenemy"
 import { startingTreasures } from "./recources/treasures"
@@ -105,6 +105,31 @@ type Tbonfire = {
     currentPlaceId: number
 }
 
+// A weapon struck into the ground or into an enemy's body (client's
+// itemInfoSystem.js's struckItemFunc "struck" button, and skills.js's
+// spawnProjectile - a thrown spear's env-hit/enemy-hit cases) -
+// createGroundWeapon on the client renders it. Same shape/removal model as
+// Ttreasure above (pickup-able, filtered out on pickup) but player-created
+// at runtime like Tbonfire, not seeded. itemDetail is a full obtain()-ready
+// inventory item, kept loose (any) same reasoning as Ttreasure's own
+// itemDetail. ownerId is who struck it - worldsocket.js's own
+// reCreateMeshesInScene loop uses it to skip re-creating a duplicate on the
+// striker's OWN client, which already rendered its own local copy the
+// instant it struck (same self-exclusion shape the players loop already
+// uses: `if (tcpCharDet.owner === characterState.owner) return`).
+type Tstruckweapon = {
+    itemId: string
+    pos: { x: number, y: number, z: number }
+    currentPlaceId: number
+    itemDetail: any
+    ownerId: string
+    // set only for the enemy-stick case (creations/skills.js's own
+    // enemy-hit branch) - worldsocket.js's own struck-weapon sync uses this
+    // to parent every other client's copy directly to that enemy instead of
+    // a floating static copy at `pos` (kept as the fallback either way)
+    targetEnemyId?: string
+}
+
 let players: Tplayers[] = []
 let gates: unknown[] = []
 
@@ -112,6 +137,7 @@ let tcpEnemies = enemyArray
 let quests = startingQuests
 let treasures: Ttreasure[] = startingTreasures
 let bonfires: Tbonfire[] = []
+let struckWeapons: Tstruckweapon[] = []
 // wagons is now the FOLLOWER array (recources/wagons.ts's own header
 // comment on the flip) - each entry only references which harness deer
 // pulls it via deerId, no movement law of its own. Never removed once
@@ -199,7 +225,7 @@ io.on("connection", (socket: Socket) => {
         console.log(players)
         io.emit("userJoined", { currentPlaceId: data.currentPlace.placeId, newPlayerName: data.name,
             players, placesMD, tcpEnemies, quests,
-            treasures, bonfires, wagons, harnessDeer
+            treasures, bonfires, wagons, harnessDeer, struckWeapons
         }) // always send the updated players count
     })
 
@@ -223,6 +249,30 @@ io.on("connection", (socket: Socket) => {
         const bonfire: Tbonfire = { craftId, pos: position, currentPlaceId: placeId }
         bonfires.push(bonfire)
         io.emit("bonfire-crafted", bonfire)
+    })
+
+    // client's assetcreation/creategroundweapon.js already rendered this
+    // LOCALLY the instant the player struck it (struckItemFunc's "struck"
+    // button, or a thrown spear's env-hit/enemy-hit case) - same
+    // "client acts immediately, server just relays to everyone else + what
+    // a fresh joiner's userJoined payload replays it from" trust level
+    // craft-bonfire above already uses. Bare io.emit, same reasoning - the
+    // striker's own reCreateMeshesInScene-style handling of this event
+    // (worldsocket.js) already skips re-creating a duplicate for its own
+    // ownerId, so the echo back to itself is a harmless no-op there.
+    safeOn(socket, "strike-weapon", data => {
+        const { itemId, pos, placeId, itemDetail, ownerId, targetEnemyId } = data
+        const weapon: Tstruckweapon = { itemId, pos, currentPlaceId: placeId, itemDetail, ownerId, targetEnemyId }
+        struckWeapons.push(weapon)
+        io.emit("weapon-struck", weapon)
+    })
+    // a struck weapon getting picked up - same shape as removeTreasure above
+    // (bare id string, naturally idempotent, client-authoritative - not a
+    // hardened anti-duplication lock, same trust level this whole server
+    // already gives every other piece of loot).
+    safeOn(socket, "pickup-struck-weapon", weaponId => {
+        struckWeapons = struckWeapons.filter(w => w.itemId !== weaponId)
+        io.emit("struck-weapon-removed", weaponId)
     })
 
     // WORLD CHAT - simple global relay, no rooms/parties. tcp has no db
@@ -822,23 +872,21 @@ const SLIME_SPAWN_DIST_MAX = 25
 // anything this interval just spawned reliably still reads as "covered"
 // on the very next check even after a second of player movement.
 const SLIME_SPAWN_NEARBY_RADIUS = 40
-// waterslime/fireslime/electricslime/orangelith/darkslime, one random pick
-// per qualifying player per tick - "as long as I am in their territory" was
-// given as a single shared gate (OPENWORLD_SLIME_TERRITORY) covering all
-// five types together, not a separate per-type sub-range check. Monoliths
-// and darkslime reuse this exact same territory (not a separate one of
-// their own) - still named SLIME_SPAWN_* despite generateMonoliths/
-// generateDarkSlimes being in here too, same constants/interval, just a
-// wider generator pool now. Each generator call below still gets its own
-// band via SLIME_SPAWN_DIST_MIN/MAX around the player, same as always -
-// this pool only decides WHICH type can spawn near a player anywhere
-// inside the whole 0-3000 territory, not where within it. That's fine:
-// unlike the static withTerritory bands above (which keep each type in
-// its own ring), the dynamic top-up has always let any of these spawn
-// near any qualifying player regardless of distance from center - a
-// darkslime can already turn up close to spawn this way, same as a
-// monolith or electricslime could before it.
-const SLIME_SPAWN_GENERATORS = [generateFireSlimes, generateElectricSlimes, generateSlimes, generateMonoliths, generateDarkSlimes]
+// band-matched to the PLAYER's own current distance from center, using the
+// exact same OPENWORLD_ENEMY_BANDS table the static population
+// (enemyDetails.ts) was built from - NOT a uniform random pick across every
+// type regardless of where the player actually is, which is what this used
+// to do (a flat SLIME_SPAWN_GENERATORS array, one random element per tick).
+// That was the actual bug behind seeing the wrong monsters near spawn: the
+// static rings were always correctly banded, but this dynamic top-up - the
+// thing that keeps the world populated as players roam/kill things, and
+// which runs far more often (every 500ms, per player) than the one-time
+// static build - could spawn a darkslime or monolith 15-25 units from a
+// player standing right in waterslime's own 100-150 band, since it never
+// checked distance-from-center at all, only "is this player somewhere in
+// the whole 0-3000 territory." Now it looks up whichever band the player's
+// own distFromCenter actually falls into and only ever tops up with THAT
+// type - a player in waterslime's band gets more waterslime, nothing else.
 setInterval(() => {
     players.forEach(player => {
         if(player.currentPlace?.placeId !== 888) return
@@ -859,8 +907,10 @@ setInterval(() => {
         )
         if(hasNearbyEnemy) return
 
-        const generator = SLIME_SPAWN_GENERATORS[Math.floor(Math.random() * SLIME_SPAWN_GENERATORS.length)]
-        const [newSlime] = generator(1, 888, 100, "ring", player.pos.x, player.pos.z, SLIME_SPAWN_DIST_MIN, SLIME_SPAWN_DIST_MAX)
+        const band = OPENWORLD_ENEMY_BANDS.find(b => distFromCenter >= b.minDist && distFromCenter <= b.maxDist)
+        if(!band) return // between two bands (shouldn't happen, they're contiguous) or past the outermost one
+
+        const [newSlime] = band.generator(1, 888, 100, "ring", player.pos.x, player.pos.z, SLIME_SPAWN_DIST_MIN, SLIME_SPAWN_DIST_MAX)
         ;(newSlime as any).territory = OPENWORLD_SLIME_TERRITORY
         newSlime._id = randNumString()
         newSlime.respawnDetails = {

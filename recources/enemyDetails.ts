@@ -4,21 +4,20 @@ import { generateSlimes, generateFireSlimes, generateElectricSlimes, generateMon
 
 let monolithBodyHeight = 2
 
-// openworld (placeId 888) slime territory - every water/fire/electric slime
-// placed there (both the static ones below AND any index.ts spawns
-// dynamically on top of them, see its own SLIME_SPAWN_* interval) carries
-// this same object on .territory, a shared reference rather than a fresh
-// copy per enemy. Centered on infterrain's own SPAWN_X/SPAWN_Z (0, 500) -
-// same center every ring/band below is already scattered around - covering
-// the combined range every slime type's own band sits within (waterslime
-// 100-150, fireslime 300-600, electricslime 600-1000).
-// maxDist bumped 1000 -> 3000 so darkslime's own 1000-3000 band below
-// (and index.ts's dynamic SLIME_SPAWN_* top-up) actually gets covered by
-// this shared gate - a player past the old 1000 edge used to walk into a
-// completely empty stretch with nothing spawning/respawning near them at
-// all, this is what now fills that gap instead of just widening an
-// existing band.
-export const OPENWORLD_SLIME_TERRITORY = { center: { x: 0, y: 0, z: 500 }, minDist: 0, maxDist: 3000 }
+// openworld (placeId 888) enemy territory - every enemy placed there (both
+// the static OPENWORLD_ENEMY_BANDS population below AND any index.ts spawns
+// dynamically topped up on top of them) carries this same object on
+// .territory, a shared reference rather than a fresh copy per enemy.
+// Centered on infterrain's own SPAWN_X/SPAWN_Z (0, 500) - same center every
+// band below is already scattered around. maxDist (2600) matches
+// OPENWORLD_ENEMY_BANDS' own outermost band (forestdeer, ...-2600) exactly -
+// see that table further down for the real per-type radius breakdown; kept
+// as its own separate constant here only because this whole object needs to
+// exist before withTerritory (right below) can reference it, and
+// withTerritory itself needs to exist before OPENWORLD_ENEMY_BANDS' own
+// static population uses it. Keep these two in sync if either end of the
+// outermost band ever changes.
+export const OPENWORLD_SLIME_TERRITORY = { center: { x: 0, y: 0, z: 500 }, minDist: 0, maxDist: 2600 }
 // applies OPENWORLD_SLIME_TERRITORY to every enemy a generator call
 // produced - .map() instead of baking .territory into the shared
 // slimeBase/fireSlimeBase/electricSlimeBase templates themselves
@@ -86,58 +85,65 @@ const enemyInterface = {
     }
 }
 
+// --- OPENWORLD (placeId 888) RADIAL BANDING ---
+// Single source of truth for "how far from center does each enemy type
+// spawn," centered on OPENWORLD_SLIME_TERRITORY's own (0, 500) (infterrain's
+// SPAWN_X/SPAWN_Z, also the player's own openworld spawn point). Ordered
+// nearest-to-farthest, matching the intended difficulty progression a
+// player walking straight out from spawn should actually encounter:
+// waterslime -> fireslime -> electricslime -> orangelith -> darkslime ->
+// forestdeer. Bands are contiguous and non-overlapping by construction (each
+// one's minDist is the previous one's maxDist) - keep them that way when
+// tuning, or two types end up sharing ground again.
+//
+// Used for BOTH the static population below (one flatMap instead of six
+// hand-typed withTerritory(generateX(...)) calls that could silently drift
+// out of sync with each other - which is exactly what had happened here:
+// the six calls used to be typed in a completely different order than their
+// own radius numbers actually put them in, so reading the file top-to-bottom
+// never matched what a player walking outward actually ran into) AND
+// index.ts's own dynamic top-up interval, which used to pick a generator
+// UNIFORMLY AT RANDOM across all five types regardless of the player's
+// actual distance from center - see that file's own comment on
+// OPENWORLD_ENEMY_BANDS for the full "why" this was the real bug behind
+// seeing the wrong monsters near spawn. The static rings below were always
+// correctly banded; the dynamic top-up that keeps the world populated as
+// players roam/kill things was not, and it runs far more often (every 500ms,
+// per player) than the one-time static build.
+//
+// areaSize (unused by "ring" scatter itself, kept only because
+// generateEnemies' own signature still takes one) is derived here as
+// maxDist*2, same "roughly 2x maxRadius" convention this file's own
+// generator calls always used by hand.
+export const OPENWORLD_ENEMY_BANDS = [
+    { generator: generateSlimes,         name: "waterslime",    count: 15, minDist: 100,  maxDist: 150 },
+    { generator: generateFireSlimes,     name: "fireslime",     count: 50, minDist: 150,  maxDist: 450 },
+    { generator: generateElectricSlimes, name: "electricslime", count: 50, minDist: 450,  maxDist: 850 },
+    { generator: generateMonoliths,      name: "orangelith",    count: 5,  minDist: 850,  maxDist: 950 },
+    { generator: generateDarkSlimes,     name: "darkslime",     count: 50, minDist: 950,  maxDist: 2000 },
+    { generator: generateForestDeer,     name: "forestdeer",    count: 10, minDist: 2000, maxDist: 2600 },
+]
+
 export default [
-    // ...generateSlimes(20),
-    // openworld (placeId 888) - centered on infterrain's own SPAWN_X/SPAWN_Z (0, 500),
-    // not world origin, since that's where the actual playable terrain/player spawn is
-    // ...generateSlimes(10, 888, 300, "ring", 0, 500),
-    // ring surrounding the openworld cluster - scattered 100-150 units out from (0, 500)
-    ...withTerritory(generateSlimes(15, 888, 300, "ring", 0, 500, 100, 150)),
-    // fireslime/electricslime openworld population, banded rings around the
-    // same (0, 500) center (infterrain's own SPAWN_X/SPAWN_Z, also the
-    // player's own openworld spawn point) - fireslime 300-600 units out,
-    // electricslime 600-1000, so the spawn point itself and its immediate
-    // surroundings (0-300) stay completely enemy-free instead of dropping a
-    // fresh arrival straight into a slime cluster. "ring" scatterPosition
-    // picks a uniformly random angle (0-2π) for every single enemy
-    // regardless of minRadius/maxRadius, so this still naturally covers
-    // every direction - north/south/east/west - within each band, not just
-    // one strip. These numbers are exactly what checkDistance({x:0,y:0,
-    // z:500}, yourPos) reads client-side (creationTools.js's checkDistance
-    // flattens both points to the same y before measuring, so it's the same
-    // planar distance minRadius/maxRadius are measured in here) - inputMovement.js:407
-    // is a live example of reading that same distance. areaSize (unused by
-    // "ring" scatter, only minRadius/maxRadius matter for it) passed just
-    // for readability, roughly 2x each band's own maxRadius.
-    // 50 each (down from an initial 250/250) - static population is
-    // deliberately sparse now, index.ts's own SLIME_SPAWN_* interval tops
-    // territory up dynamically near whichever players are actually out
-    // there instead of pre-building the whole area upfront. See
-    // client/src/sockets/renderer.js's own OPENWORLD_PLACE_ID distance-based
-    // mesh hiding (200 units) for how the client keeps this affordable to
-    // render regardless of how many end up alive at once.
-    ...withTerritory(generateFireSlimes(50, 888, 1200, "ring", 0, 500, 300, 600)),
-    ...withTerritory(generateElectricSlimes(50, 888, 2000, "ring", 0, 500, 600, 1000)),
-    // orangelith monoliths - further out than the slime ring, ~200 units
-    // from (0, 500). Tagged with the same OPENWORLD_SLIME_TERRITORY the
-    // slimes already carry (not a separate monolith-only territory) - now
-    // that index.ts's own SLIME_SPAWN_* interval also spawns monoliths
-    // dynamically via generateMonoliths, they share the identical gate.
-    ...withTerritory(generateMonoliths(5, 888, 300, "ring", 0, 500, 200, 260)),
-    // forestdeer - fills the 150-200 gap between waterslime's own ring
-    // (100-150) and monolith's (200-260), previously empty. 10 (between
-    // monolith's 5 and a slime band's 50) since it's a rarer, tougher single
-    // enemy (lvl20/hp5700/dmg40, genenemy.ts's own forestDeer), not a
-    // common trash mob.
-    ...withTerritory(generateForestDeer(10, 888, 400, "ring", 0, 500, 150, 200)),
-    // darkslime - past electricslime's own 600-1000 band, filling the
-    // 1000-3000 stretch that used to be completely empty (see
-    // OPENWORLD_SLIME_TERRITORY's own comment above). Toughest of the four
-    // slimes by design (darkSlimeBase in genenemy.ts), matching "farther
-    // out = harder" for every other band in this ring.
-    ...withTerritory(generateDarkSlimes(50, 888, 800, "ring", 0, 500, 1000, 3000)),
-    // single lesserdemon at the openworld center
-    ...generateLesserDemons(1, 888, 300, "fixed", -34, 70),
+    // openworld (placeId 888) - the six bands above, in the exact same
+    // nearest-to-farthest order they're declared in (see that table's own
+    // header comment). 50/50/50 for the three common trash-mob bands (down
+    // from an initial 250/250 - static population is deliberately sparse
+    // now, index.ts's own dynamic top-up interval tops territory up near
+    // whichever players are actually out there instead of pre-building the
+    // whole area upfront - see client/src/sockets/renderer.js's own
+    // OPENWORLD_PLACE_ID distance-based mesh hiding for how the client keeps
+    // this affordable regardless of how many end up alive at once), 5/10 for
+    // the two rarer/tougher single-type bands (orangelith/forestdeer).
+    ...OPENWORLD_ENEMY_BANDS.flatMap(band =>
+        withTerritory(band.generator(band.count, 888, band.maxDist * 2, "ring", 0, 500, band.minDist, band.maxDist))
+    ),
+    // single lesserdemon - removed for now (was at (85, 585), ~120 units
+    // from the true openworld center (0, 500), inside waterslime's own
+    // 100-150 band - see git history/prior comment here for the full
+    // "was (-34, 70), nowhere near center" fix this position itself was).
+    // Re-add with `...generateLesserDemons(1, 888, 300, "fixed", 85, 585),`
+    // if/when this comes back.
     {...enemyInterface,
         _id: `${randNumString()}`,
         maxDistance: 0.5,
