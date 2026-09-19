@@ -254,6 +254,31 @@ function applyDamageToEnemy(data: any) {
     io.emit("enemy-is-hit", {...data, dmgToApply, hp: enemyTarg.hp, maxHp: enemyTarg.maxHp})
 }
 
+// the ONE place an enemy's _targetId actually gets set, WITHOUT overwriting
+// one it already has - originally inline inside the "registerPlayerAsEnemy"
+// handler below (a real player's own atkDetection proximity trigger,
+// createEnemy.js, calls emitRegisterAsEnemy the moment their OWN character
+// walks into an enemy's detection zone). Pulled out the same way
+// applyDamageToEnemy was, so the BOT PLAYERS block further down can
+// register a bot as an enemy's target too - a bot has no real client of
+// its own to run that exact proximity-trigger code (it only ever exists as
+// broadcast data, never a real body in anyone's physics scene), so without
+// this an enemy a bot is actively hitting would just never notice/retaliate
+// at all. Called from the bot's own dealDamage callback the moment it lands
+// a hit, as the closest available stand-in for "is now engaging this
+// enemy up close" - not on every single hit's worth of urgency, just
+// whenever the enemy doesn't already have SOME target (same guard the real
+// player path already enforces).
+function registerTargetIfNone(enemyId: string, targetId: string, dirTarg: any) {
+    const enemyTarg = tcpEnemies.find(enem => enem._id === enemyId)
+    if(!enemyTarg) return
+    if(enemyTarg._targetId) return
+
+    enemyTarg._targetId = targetId
+    enemyTarg._dirTarg = dirTarg
+    io.emit("registered-playerAsEnemy", tcpEnemies)
+}
+
 io.on("connection", (socket: Socket) => {
     safeOn(socket, "join-world", (data, callback) => {
         // join-world fires every time the client loads a new place, not just
@@ -742,18 +767,7 @@ io.on("connection", (socket: Socket) => {
         })
         io.emit("enemy-attacked-range", data)
     })
-    safeOn(socket, "registerPlayerAsEnemy", data => {
-        tcpEnemies.forEach(enem => {
-            if(data._id === enem._id){
-                console.log("confirm enemy exist")
-                if(enem._targetId) return console.log("enemy already has target ", enem._targetId)
-
-                enem._targetId = data.targetId
-                enem._dirTarg = data.dirTarg
-            }
-        })
-        io.emit("registered-playerAsEnemy", tcpEnemies)
-    })
+    safeOn(socket, "registerPlayerAsEnemy", data => registerTargetIfNone(data._id, data.targetId, data.dirTarg))
     safeOn(socket, "enemyWillChase", data => {
         const { currentPlaceId, _id, targetId, actionType } = data
         tcpEnemies.forEach(enem => {
@@ -917,6 +931,17 @@ const BOT_SPAWN_INTERVAL_MS = 5000
 // radius is a reasonable village-sized guess, smaller than openworld's 40
 // since a village is a much more tightly-built space (buildings/fences) a
 // wide roam radius could wander a bot into.
+// village center is BACK at (0,0), its true own origin - a previous fix
+// moved this to (6.6,130), right on top of the only 3 village enemies, so a
+// bot could actually reach them - but spawning a bot already standing next
+// to its prey skips the entire point of watching it hunt. (0,0) is fine
+// again now that Brain's own pickWanderTarget has a real hunting bias (see
+// npcBrain.ts's own HUNT_CONE_RADIANS/getNearestEnemy) that pulls a bot's
+// wander direction toward ANY known enemy in its place, no matter how far,
+// instead of only ever bumbling into one by pure chance within its home
+// leash - a village bot spawned at (0,0) will now actually travel the
+// ~130 units toward those slimes over several wander hops, not teleport
+// there or wander forever without a chance of finding them.
 const BOT_SPAWN_PLACES = [
     { placeId: 1, name: "village", areaType: "village", center: { x: 0, z: 0 }, radius: 20 },
     { placeId: 888, name: "openworld", areaType: "openworld", center: { x: 0, z: 500 }, radius: 40 },
@@ -941,6 +966,26 @@ const BOT_CLOTH = ["style1", "style2", "style3"]
 const BOT_PANTS = ["style1", "style2"]
 const BOT_BOOTS = ["style1", "style2"]
 const BOT_SKIN = ["skin1", "skin2", "skin3", "skin4"]
+// real common-tier swordsData.js entries, hand-copied (tcp can't import
+// client/src/staticRecources/swordsdata.js directly - separate node
+// project) - createWeapon() needs a valid weaponType + parts shape to
+// render anything at all, so these are 3 of the actual shipped common
+// swords rather than invented placeholder values that might not resolve
+// to real part-mesh/color names.
+const BOT_SWORDS = [
+    {
+        name: "frostmarkblade", dn: "Frostmark Blade",
+        parts: { bladeRarity: "common1", guardRarity: "common1", handleRarity: "common1", pommelRarity: "common1", bladeColor: "iron", guardColor: "sodalite", handleColor: "wood", pommelColor: "firecrystal" },
+    },
+    {
+        name: "emberfallblade", dn: "Emberfall Blade",
+        parts: { bladeRarity: "common1", guardRarity: "common1", handleRarity: "common1", pommelRarity: "common2", bladeColor: "steel", guardColor: "bronze", handleColor: "leather", pommelColor: "firecrystal" },
+    },
+    {
+        name: "winterlaceblade", dn: "Winterlace Blade",
+        parts: { bladeRarity: "common1", guardRarity: "common1", handleRarity: "common2", pommelRarity: "common1", bladeColor: "silver", guardColor: "silver", handleColor: "bone", pommelColor: "frostshard" },
+    },
+]
 // {r,g,b} 0-1 floats, same shape/range client/src/constants/adventurerColors.js's
 // own ADVENTURER_COLORS palette already uses (a small hand-picked subset of
 // it, not imported directly - tcp is a separate node project from client,
@@ -968,6 +1013,56 @@ function pickBotName(): string {
     return `${pickOne(BOT_NAMES)} ${randNumString().slice(0, 2)}`
 }
 
+// a real, equipped common sword + boots - same full item shape a real
+// swordsData.js/npcDetails.js item already uses (createCharacter's own
+// equip dispatch needs every one of these fields, not just name/itemType).
+// Every bot gets both regardless of attitude - a caster-leaning bot
+// visibly carrying a sheathed sword it rarely swings is normal enough (a
+// real adventurer keeps a sidearm even if they mostly cast), and this was
+// asked for unconditionally, not just for weapon-heavy attitudes.
+function buildBotItems(): any[] {
+    const sword = pickOne(BOT_SWORDS)
+    return [
+        {
+            itemId: `bot-item-${randNumString()}`,
+            name: sword.name,
+            dn: sword.dn,
+            itemCateg: "equipable",
+            itemType: "weapon",
+            weaponType: "sword",
+            equipAbilities: { dmg: 14, def: 0, magicDmg: 0, plusStr: 0, plusDex: 0, plusInt: 0 },
+            consumeAbilities: { plusHp: 0, plusMp: 0, plusSp: 0, plusDmg: 0, plusSpd: 0 },
+            equiped: true,
+            soulFeed: 0,
+            isEnhanceAble: true,
+            enhancedLevel: 0,
+            slots: [],
+            durability: { current: 100, max: 100 },
+            price: { coinType: "bronze", pieces: 8 },
+            qnty: 1,
+            rarity: "common",
+            parts: sword.parts,
+        },
+        {
+            itemId: `bot-item-${randNumString()}`,
+            name: "leatherboots",
+            dn: "Leather Boots",
+            itemCateg: "equipable",
+            itemType: "boots",
+            equipAbilities: { dmg: 0, def: 0, resistance: 5, magicDmg: 0, plusStr: 0, plusDex: 0, plusInt: 0 },
+            consumeAbilities: { plusHp: 0, plusMp: 0, plusSp: 0, plusDmg: 0, plusSpd: 0 },
+            equiped: true,
+            soulFeed: 0,
+            isEnhanceAble: false,
+            enhancedLevel: 0,
+            durability: { current: 100, max: 100 },
+            price: { coinType: "bronze", pieces: 9 },
+            qnty: 1,
+            rarity: "common",
+        },
+    ]
+}
+
 function spawnBot() {
     if (bots.length >= MAX_BOTS) return
 
@@ -982,10 +1077,10 @@ function spawnBot() {
     const spawnZ = place.center.z + Math.sin(angle) * dist
 
     // same shape/fields a real join-world push builds (see that handler
-    // above) - items/skills empty is deliberate for this movement-only
-    // phase (no weapon data needed yet, "attacking later" per spec), so
-    // hasWeapon correctly comes out false the same way a real unarmed
-    // player's own join would compute it
+    // above) - items now include a real equipped sword + boots
+    // (buildBotItems), so hasWeapon is computed the exact same way a real
+    // join already does (data.items.some(...)), not hardcoded false
+    const botItems = buildBotItems()
     const botPlayer: Tplayers = {
         socketId: `bot-socket-${owner}`,
         owner,
@@ -1008,9 +1103,9 @@ function spawnBot() {
         mode: "idle",
         pos: { x: spawnX, y: RESTING_Y, z: spawnZ },
         dirTarg: { x: spawnX, y: 0, z: spawnZ + 1 },
-        items: [],
+        items: botItems,
         skills: [],
-        hasWeapon: false,
+        hasWeapon: botItems.some(itm => itm.itemType === "weapon" && itm.equiped),
         weaponBlocking: false,
         magicBlocking: false,
         IsInVulnerable: false,
@@ -1070,6 +1165,45 @@ function spawnBot() {
                 currentPlaceId: botPlayer.currentPlace.placeId,
                 isPhysical: true,
             })
+
+            // an enemy with no target yet doesn't otherwise notice a bot at
+            // all (see registerTargetIfNone's own header comment - a bot
+            // has no client of its own to run the real atkDetection
+            // proximity trigger real players register through). Landing a
+            // hit is the closest available stand-in for "is now engaging
+            // this enemy up close" - won't steal a target away from
+            // whoever the enemy is already fighting, same guard the real
+            // player path already enforces.
+            registerTargetIfNone(targetId, owner, botPlayer.pos)
+
+            // visible swing animation - same "player-attacked" broadcast a
+            // real melee swing already produces (client/src/charactersystem/
+            // attackingSystem.js's own attack() function plays whatever
+            // animName rides along, on EVERY connected client watching, not
+            // just locally) - reusing it here is what actually makes a bot
+            // look like it's swinging instead of just standing in a
+            // "fighting" stance while damage silently lands. Melee-style
+            // bots only (attitude.weapon > 0.5 - same threshold
+            // npcBrain.ts's own isMeleeStyle() uses, must stay in sync) - a
+            // caster-leaning bot hits from range without touching the
+            // enemy at all, a sword/spear swing wouldn't make sense there.
+            if(attitude.weapon > 0.5){
+                const equippedWeapon = botItems.find(itm => itm.itemType === "weapon" && itm.equiped)
+                const weaponType = equippedWeapon?.weaponType ?? "sword"
+                const animPool = weaponType === "spear" ? ["spearattack1", "spearattack2"] : ["swordattack1", "swordattack2"]
+                io.emit("player-attacked", {
+                    owner,
+                    pos: botPlayer.pos,
+                    dirTarg: botPlayer.dirTarg,
+                    dmgDetails: { physicalDmg: dmgDetails.physicalDmg, weaponDmg: dmgDetails.weaponDmg, magicDmg: 0, accuracy: 1 },
+                    hasWeapon: equippedWeapon?.name ?? false,
+                    isMissed: false,
+                    weaponType,
+                    currentPlaceId: botPlayer.currentPlace.placeId,
+                    atkSpd: 0.2,
+                    animName: pickOne(animPool),
+                })
+            }
         },
     })
 

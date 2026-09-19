@@ -38,15 +38,16 @@ export const ATTITUDE_PRESETS: Record<string, Attitude> = {
 // walkSpeed:1/sprintSpeed:20) as the starting point - a bot moving at
 // WALK_SPEED covers ground at the same rate a real player's own idle-walk
 // does. SPRINT_SPEED is deliberately NOT the real 20 though - a bot
-// actually sprinting at real player speed read as too fast/frantic, cut by
-// 60% (20 * 0.4 = 8) on request. Must match client/src/sockets/renderer.js's
-// own BOT_SPRINT_SPEED exactly - that's what actually steps a bot's
-// position each frame, this is only what the server's own internal
-// simulation (arrival timing, combat range/cooldown pacing) assumes it's
-// moving at; if the two drift apart, the server's own "have I arrived
-// yet"/combat-engagement timing would stop matching what's rendered.
+// actually sprinting at real player speed read as too fast/frantic, cut
+// 80% off the real value (20 * 0.2 = 4) on request. Must match
+// client/src/sockets/renderer.js's own BOT_SPRINT_SPEED exactly - that's
+// what actually steps a bot's position each frame, this is only what the
+// server's own internal simulation (arrival timing, combat range/cooldown
+// pacing) assumes it's moving at; if the two drift apart, the server's own
+// "have I arrived yet"/combat-engagement timing would stop matching what's
+// rendered.
 const WALK_SPEED = 1
-const SPRINT_SPEED = 8
+const SPRINT_SPEED = 4
 
 // how often the brain re-decides what to do next ("outputs 0 to 1" - see
 // think() below) - randomized per-decision, not fixed, so a room full of
@@ -60,10 +61,26 @@ const DECISION_MAX_MS = 9000
 // requirement), trading a little smoothness for not running this loop 8x
 // more than necessary per bot once several are on scene at once
 const MOVE_TICK_MS = 120
-// how far from its own spawn anchor a bot will consider wandering, scaled
-// down per-bot by (1 - distancing) below - not a hard fence, just the
-// radius a fresh wander target gets rolled within
+// max distance covered by a SINGLE wander hop (scaled down per-bot by
+// distancing in pickWanderTarget - not a hard fence on that hop, just its
+// own roll range). Each hop now originates from wherever the bot CURRENTLY
+// is, not a fixed point - see pickWanderTarget's own header comment for
+// why that changed.
 const WANDER_RADIUS = 40
+// each hop must cover at least this fraction of its own rolled distance -
+// a plain `Math.random() * radius` (the old behavior) is uniform from 0,
+// so on average half of all hops were short micro-steps. Combined with
+// every hop being independently re-rolled around a single FIXED anchor for
+// the bot's entire lifetime (also fixed below), that's what produced the
+// "runs 4 steps, stops, runs 4 steps some other direction, forever near
+// the same spot" look - confirmed from an actual report, not a guess.
+const WANDER_MIN_DIST_FRACTION = 0.5
+// hard leash - each hop originates from the bot's current position now
+// (so consecutive hops actually go somewhere, compounding outward instead
+// of resetting), but is pulled back toward homeAnchor (the TRUE, never-
+// updated spawn point) if it would land further than this - keeps a bot
+// from wandering off indefinitely over many compounding hops
+const MAX_HOME_DRIFT = 50
 // "close enough, stop and pick a new decision on the next think() tick"
 const ARRIVE_RADIUS = 1.5
 
@@ -158,7 +175,10 @@ export type BotMoveCallback = (
 // reliable "did we actually arrive" signal on its own.
 export class Brain {
     attitude: Attitude
-    private anchor: { x: number, z: number }
+    // TRUE, never-updated spawn point - only ever used as the leash center
+    // in pickWanderTarget below, NOT as where each hop originates from
+    // anymore (see that function's own header comment)
+    private homeAnchor: { x: number, z: number }
     private vehicle: Vehicle
     private arrive: ArriveBehavior
     private obstacleAvoidance: ObstacleAvoidanceBehavior
@@ -182,7 +202,7 @@ export class Brain {
 
     constructor(attitude: Attitude, spawnPos: { x: number, z: number }, onMove: BotMoveCallback, combat: CombatContext){
         this.attitude = attitude
-        this.anchor = { ...spawnPos }
+        this.homeAnchor = { ...spawnPos }
         this.onMove = onMove
         this.combat = combat
 
@@ -290,22 +310,18 @@ export class Brain {
             return
         }
 
-        // in range - hold position and swing/cast on cooldown
+        // in range - hold position, but keep FACING the target's own live
+        // position every single check tick (not just when an attack
+        // actually fires below) - an enemy can keep moving/repositioning
+        // while the bot is holding still on cooldown, and this is what
+        // actually keeps it turning to track that instead of freezing
+        // toward wherever the target was the last time it swung. Same
+        // dirTarg-must-match-pos.y reasoning stop()'s own comment gives
+        // (worldsocket.js's "stopped" handler uses dirTarg verbatim).
         this.moving = false
         this.arrive.active = false
         this.vehicle.velocity.set(0, 0, 0)
 
-        const cooldown = this.isMeleeStyle() ? MELEE_COOLDOWN_MS : CAST_COOLDOWN_MS
-        const now = Date.now()
-        if(now - this.lastAttackAt < cooldown) return
-        this.lastAttackAt = now
-
-        const dmg = this.isMeleeStyle() ? MELEE_DMG : CAST_DMG
-        this.combat.dealDamage(target._id, { physicalDmg: dmg, weaponDmg: 0 })
-
-        // face the target while attacking, even though not "moving" -
-        // same dirTarg-must-match-pos.y reasoning stop()'s own comment
-        // gives (worldsocket.js's "stopped" handler uses dirTarg verbatim)
         const facing = dist > 0.01 ? { x: dx / dist, z: dz / dist } : { x: 0, z: 1 }
         this.onMove(
             { x: p.x, y: RESTING_Y, z: p.z },
@@ -313,6 +329,16 @@ export class Brain {
             this.mode,
             false,
         )
+
+        // the actual swing/cast still only fires on its own cooldown -
+        // facing above refreshes independently of this, every tick
+        const cooldown = this.isMeleeStyle() ? MELEE_COOLDOWN_MS : CAST_COOLDOWN_MS
+        const now = Date.now()
+        if(now - this.lastAttackAt < cooldown) return
+        this.lastAttackAt = now
+
+        const dmg = this.isMeleeStyle() ? MELEE_DMG : CAST_DMG
+        this.combat.dealDamage(target._id, { physicalDmg: dmg, weaponDmg: 0 })
     }
 
     // a small utility-AI pass: score every candidate action 0-1 against
@@ -326,6 +352,22 @@ export class Brain {
         // owns movement/target entirely while engaged - re-rolling a wander
         // decision mid-fight would fight it for control of `target`/`arrive`
         if(this.combatTargetId){
+            this.scheduleThink()
+            return
+        }
+
+        // already mid-walk toward a wander target - let it actually arrive
+        // (tickMove's own arrival check calls stop(), which is what clears
+        // `moving` and lets the NEXT think() tick roll a fresh decision).
+        // Without this guard, think() re-rolled wanderScore/holdScore every
+        // single DECISION_MIN/MAX_MS cycle regardless of whether the
+        // previous wander had finished - a fresh target is rolled
+        // independently around the fixed anchor each time, not from
+        // wherever the bot currently is, so it could easily land behind or
+        // to the side of the bot's current heading. Confirmed from an
+        // actual screenshot: bots visibly yanked back and forth in a tiny
+        // area instead of ever completing one trip out and back.
+        if(this.moving){
             this.scheduleThink()
             return
         }
@@ -344,16 +386,38 @@ export class Brain {
         this.decisionTimer = setTimeout(() => this.think(), delay)
     }
 
+    // hops from wherever the bot CURRENTLY is (this.vehicle.position), not
+    // a single fixed anchor re-used for its whole lifetime - the old
+    // version rolled every hop independently around the original spawn
+    // point, which (combined with distance being uniform-random from 0)
+    // produced a lot of short, directionally-unrelated hops that never
+    // went anywhere - confirmed from an actual report as looking like a
+    // bot running back and forth in place. Hops now compound (each one
+    // continues from where the last ended) and cover a real minimum
+    // distance (WANDER_MIN_DIST_FRACTION), so a bot actually travels
+    // somewhere each time - MAX_HOME_DRIFT is what stops that compounding
+    // from letting it wander off indefinitely.
     private pickWanderTarget(){
         // distancing scales the roll UP toward the full radius - a
         // low-distancing bot (a caster that did decide to move) still only
         // repositions a short way, a high-distancing one (adventurer) can
         // roll the full WANDER_RADIUS
-        const radius = WANDER_RADIUS * (0.15 + this.attitude.distancing * 0.85)
+        const hopRadius = WANDER_RADIUS * (0.15 + this.attitude.distancing * 0.85)
         const angle = Math.random() * Math.PI * 2
-        const dist = Math.random() * radius
-        const tx = this.anchor.x + Math.cos(angle) * dist
-        const tz = this.anchor.z + Math.sin(angle) * dist
+        const dist = hopRadius * (WANDER_MIN_DIST_FRACTION + Math.random() * (1 - WANDER_MIN_DIST_FRACTION))
+        let tx = this.vehicle.position.x + Math.cos(angle) * dist
+        let tz = this.vehicle.position.z + Math.sin(angle) * dist
+
+        // leash - pull the target back toward homeAnchor if this hop would
+        // land further than MAX_HOME_DRIFT from the bot's true spawn point
+        const homeDx = tx - this.homeAnchor.x
+        const homeDz = tz - this.homeAnchor.z
+        const homeDist = Math.hypot(homeDx, homeDz)
+        if(homeDist > MAX_HOME_DRIFT){
+            const pullBack = MAX_HOME_DRIFT / homeDist
+            tx = this.homeAnchor.x + homeDx * pullBack
+            tz = this.homeAnchor.z + homeDz * pullBack
+        }
 
         this.target = { x: tx, z: tz }
         this.moveArriveRadius = ARRIVE_RADIUS
