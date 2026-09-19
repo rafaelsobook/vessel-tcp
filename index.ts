@@ -935,13 +935,12 @@ const BOT_SPAWN_INTERVAL_MS = 5000
 // moved this to (6.6,130), right on top of the only 3 village enemies, so a
 // bot could actually reach them - but spawning a bot already standing next
 // to its prey skips the entire point of watching it hunt. (0,0) is fine
-// again now that Brain's own pickWanderTarget has a real hunting bias (see
-// npcBrain.ts's own HUNT_CONE_RADIANS/getNearestEnemy) that pulls a bot's
-// wander direction toward ANY known enemy in its place, no matter how far,
-// instead of only ever bumbling into one by pure chance within its home
-// leash - a village bot spawned at (0,0) will now actually travel the
-// ~130 units toward those slimes over several wander hops, not teleport
-// there or wander forever without a chance of finding them.
+// again now that checkCombat's own getNearestEnemy lookup (npcBrain.ts) has
+// no distance cap at all - it locks onto and continuously chases ANY known
+// enemy in the bot's place, no matter how far, the instant one exists, so a
+// village bot spawned at (0,0) actually walks the whole ~130 units to those
+// slimes in one continuous, uninterrupted trip instead of only ever
+// bumbling into one by pure chance within some tighter aggro range.
 const BOT_SPAWN_PLACES = [
     { placeId: 1, name: "village", areaType: "village", center: { x: 0, z: 0 }, radius: 20 },
     { placeId: 888, name: "openworld", areaType: "openworld", center: { x: 0, z: 500 }, radius: 40 },
@@ -1145,12 +1144,25 @@ function spawnBot() {
         // it self-corrects the moment any newer position lands, and is
         // close enough in practice for a bot to walk into range and fight -
         // not pixel-precise tracking, just "good enough to find and reach it".
-        getNearbyEnemies: (x, z, radius) => {
-            const radiusSq = radius * radius
-            return tcpEnemies
+        //
+        // no radius cap at all - this single lookup powers BOTH target
+        // acquisition and the ongoing chase (npcBrain.ts's checkCombat), so
+        // a bot spawned nowhere near any enemy still locks onto and walks
+        // the whole distance to the nearest one instead of only ever
+        // finding one by pure chance within some tighter aggro range.
+        getNearestEnemy: (x, z) => {
+            let closest: { _id: string, x: number, z: number, hp: number } | null = null
+            let closestDistSq = Infinity
+            tcpEnemies
                 .filter(enem => enem.currentPlaceId === botPlayer.currentPlace.placeId && !enem._disabled)
-                .filter(enem => ((enem.x - x) ** 2 + (enem.z - z) ** 2) <= radiusSq)
-                .map(enem => ({ _id: enem._id, x: enem.x, z: enem.z, hp: enem.hp }))
+                .forEach(enem => {
+                    const distSq = (enem.x - x) ** 2 + (enem.z - z) ** 2
+                    if(distSq < closestDistSq){
+                        closestDistSq = distSq
+                        closest = { _id: enem._id, x: enem.x, z: enem.z, hp: enem.hp }
+                    }
+                })
+            return closest
         },
         // same applyDamageToEnemy() every real player's own "enemyIsHit"
         // handler already goes through (see that function's own header

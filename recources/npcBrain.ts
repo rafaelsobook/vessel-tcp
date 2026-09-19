@@ -105,18 +105,25 @@ const ARRIVE_RADIUS = 1.5
 const CAPSULE_HEIGHT = 1.5
 export const RESTING_Y = CAPSULE_HEIGHT / 2
 
-// COMBAT - "attacking of bots" per spec, layered on top of the same
-// wander/arrive movement above rather than a separate system: engaging an
-// enemy just re-aims the SAME arrive steering at that enemy's own position
-// instead of a wander point, so tickMove() below needs zero special-casing
-// to actually walk a bot into a fight.
-//
-// how close a bot needs to be to a real enemy before it'll break off
-// wandering and engage - checked against tcp/index.ts's own tcpEnemies
-// (getNearbyEnemies context callback below), NOT a live/precise position -
-// see that callback's own header comment in index.ts for why a chasing
-// (not yet attacking) enemy's server-tracked x/z can be a little stale.
-const AGGRO_RADIUS = 15
+// COMBAT + HUNTING - one unified system, not two. checkCombat() below is
+// the ONLY thing that ever moves a bot toward an enemy: the moment any
+// enemy exists anywhere in the bot's own place (combat.getNearestEnemy has
+// no distance cap at all), it locks on and re-aims the SAME arrive
+// steering wandering uses at that enemy's own live position, every single
+// COMBAT_CHECK_MS tick, uninterrupted, until it's actually in range. This
+// used to be split into two layers - a short-range "engage" check here
+// plus a separate cone-randomized bias nudging wander's own hop angle
+// toward a far-off enemy - and that produced exactly the "stop dead, sit
+// idle a few seconds, then walk off in a noticeably different direction"
+// look reported as looking erratic/inconsistent ("pressing w-a-s-d
+// randomly"): each wander hop re-rolled a fresh +-45 degree angle around
+// the bearing to the enemy AND fully halted between hops waiting on
+// think()'s own 4-9s decision cycle. Collapsing both into this one
+// always-on, never-interrupted chase (think() already yields control
+// entirely to checkCombat whenever combatTargetId is set - see think()'s
+// own guard) is what "if they hunt then they hunt, they just run/walk
+// continuously to that location" actually requires - simple, one
+// continuous trip, arrive, fight, done.
 // weapon-heavy ("warrior") bots have to actually close to melee range;
 // everyone else (caster-leaning attitudes) can start attacking from
 // further out without walking all the way up - same split
@@ -138,9 +145,14 @@ const CAST_DMG = 32
 
 export type EnemyLike = { _id: string, x: number, z: number, hp: number }
 export type DealDamageCallback = (targetId: string, dmgDetails: { physicalDmg: number, weaponDmg: number }) => void
-export type GetNearbyEnemies = (x: number, z: number, radius: number) => EnemyLike[]
+// closest enemy ANYWHERE in the bot's own place, no distance cap at all -
+// null if that place currently has none. The single source of truth for
+// both target ACQUISITION (checkCombat locks onto whatever this returns
+// once nothing is currently locked) and, every tick after, that target's
+// own live position while chasing/fighting it.
+export type GetNearestEnemy = (x: number, z: number) => EnemyLike | null
 export type CombatContext = {
-    getNearbyEnemies: GetNearbyEnemies
+    getNearestEnemy: GetNearestEnemy
     dealDamage: DealDamageCallback
 }
 
@@ -255,21 +267,22 @@ export class Brain {
 
     // re-evaluated every COMBAT_CHECK_MS, independent of think()'s own
     // wander decisions (which skip themselves entirely while
-    // combatTargetId is set - see think()'s own guard) - picks the nearest
-    // real enemy within AGGRO_RADIUS, sticks with it once engaged (even if
-    // a closer one shows up mid-fight) until it dies or wanders out of
-    // range, then hands control back to normal wandering.
+    // combatTargetId is set - see think()'s own guard). getNearestEnemy has
+    // NO distance cap, so this single lookup IS the bot's hunting behavior:
+    // the instant any enemy exists anywhere in its place, it locks on and
+    // keeps re-aiming at that same lookup's result every tick (whatever's
+    // currently closest) until the place has none left at all.
     private checkCombat(){
         const p = this.vehicle.position
-        const nearby = this.combat.getNearbyEnemies(p.x, p.z, AGGRO_RADIUS)
+        const target = this.combat.getNearestEnemy(p.x, p.z)
 
-        if(!nearby.length){
+        if(!target){
             if(this.combatTargetId){
-                // combat just ended (target died or wandered off) - force
-                // back to idle directly rather than routing through stop()
-                // (which no-ops if this bot was already holding still in
-                // attack range, leaving it visually stuck in "fighting"
-                // mode/pose with nothing left to fight)
+                // hunt just ended - nothing left anywhere in this place to
+                // chase. Force back to idle directly rather than routing
+                // through stop() (which no-ops if this bot was already
+                // holding still in attack range, leaving it visually stuck
+                // in "fighting" mode/pose with nothing left to fight)
                 this.combatTargetId = null
                 this.moving = false
                 this.arrive.active = false
@@ -279,28 +292,24 @@ export class Brain {
             }
             return
         }
-
-        let target = this.combatTargetId ? nearby.find(e => e._id === this.combatTargetId) : undefined
-        if(!target){
-            target = nearby.reduce((closest: (EnemyLike & { _distSq: number }) | null, e) => {
-                const distSq = (e.x - p.x) ** 2 + (e.z - p.z) ** 2
-                return (!closest || distSq < closest._distSq) ? { ...e, _distSq: distSq } : closest
-            }, null) ?? undefined
-            this.combatTargetId = target?._id ?? null
-        }
-        if(!target) return
+        this.combatTargetId = target._id
 
         const dx = target.x - p.x
         const dz = target.z - p.z
         const dist = Math.hypot(dx, dz)
         const range = this.isMeleeStyle() ? MELEE_RANGE : CAST_RANGE
-        this.mode = "fighting"
 
         if(dist > range){
             // close the distance - re-aims the SAME arrive steering
             // wandering uses at the enemy's own latest known position,
             // re-checked (and re-aimed) every tick since it can move
-            // between checks
+            // between checks. Mode stays "fighting" (not "casting") for
+            // BOTH styles while actually moving - renderer.js's own bot
+            // stepping reads mode==="fighting" to pick BOT_SPRINT_SPEED,
+            // matching the SPRINT_SPEED this same branch sets server-side;
+            // a caster-style bot chasing at "casting"+walk speed would
+            // desync from what the server's own arrival timing assumes.
+            this.mode = "fighting"
             this.target = { x: target.x, z: target.z }
             this.moveArriveRadius = range
             this.arrive.target.set(target.x, 0, target.z)
@@ -318,6 +327,19 @@ export class Brain {
         // toward wherever the target was the last time it swung. Same
         // dirTarg-must-match-pos.y reasoning stop()'s own comment gives
         // (worldsocket.js's "stopped" handler uses dirTarg verbatim).
+        //
+        // mode splits by style HERE (not moving) is what actually makes a
+        // caster-attitude bot visibly do something instead of just
+        // standing there while damage silently lands on cooldown - "casting"
+        // is a real, continuously-looping mode client/src/sockets/
+        // renderer.js already renders (ANIM_STATE.CASTING) for any player
+        // whose mode is "casting" and isn't moving, same mechanism a real
+        // player's own spellcast idle pose already uses. Melee bots keep
+        // "fighting" (COMBAT_IDLE) and additionally get a one-shot swing
+        // per swing via index.ts's own dealDamage callback below - a caster
+        // doesn't need that on top, the continuous cast loop already reads
+        // as "doing something" every tick, not just at the cooldown instant.
+        this.mode = this.isMeleeStyle() ? "fighting" : "casting"
         this.moving = false
         this.arrive.active = false
         this.vehicle.velocity.set(0, 0, 0)
@@ -397,6 +419,13 @@ export class Brain {
     // distance (WANDER_MIN_DIST_FRACTION), so a bot actually travels
     // somewhere each time - MAX_HOME_DRIFT is what stops that compounding
     // from letting it wander off indefinitely.
+    //
+    // Purely aimless movement only - checkCombat() is what handles heading
+    // toward a known enemy now (see that function's own header comment for
+    // why an earlier version of hunting lived here instead, and what that
+    // looked like). think()'s own guard already hands full control to
+    // checkCombat whenever any enemy exists anywhere in the bot's place, so
+    // this only ever runs when there's truly nothing to hunt.
     private pickWanderTarget(){
         // distancing scales the roll UP toward the full radius - a
         // low-distancing bot (a caster that did decide to move) still only
