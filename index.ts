@@ -81,7 +81,13 @@ type Tplayers = {
     hasWeapon: boolean,
     weaponBlocking: boolean,
     magicBlocking: boolean,
-    IsInVulnerable: boolean
+    IsInVulnerable: boolean,
+    // bot-only for now - a real player's own hp lives entirely client-side
+    // (characterstate.js), tracked server-side here only because a bot has
+    // no client of its own to be authoritative over its own hp the way a
+    // real player is. Undefined for every real Tplayers entry.
+    hp?: number,
+    maxHp?: number,
 }
 
 // matches treasures.ts's createSwordTreasure return shape - itemDetail kept
@@ -218,7 +224,12 @@ function safeOn(socket: Socket, event: string, handler: (...args: any[]) => void
 // ({targetId, dmgDetails, playerId, currentPlaceId, isPhysical, ...}) - a
 // bot-dealt hit just builds that same shape with its own owner id as
 // playerId (see performBotAttack further down).
-function applyDamageToEnemy(data: any) {
+// return value: true if this specific hit is what actually killed the
+// enemy (hp crossed to <=0 on THIS call), false otherwise - callers that
+// don't care (every real-player call site) just ignore it. Added for
+// spawnBot()'s own dealDamage callback, which needs to know exactly when
+// one of ITS hits was the killing blow, to level the bot up off of.
+function applyDamageToEnemy(data: any): boolean {
     const { targetId, dmgDetails } = data
 
     const enemyTarg = tcpEnemies.find(ene => ene._id === targetId)
@@ -238,11 +249,13 @@ function applyDamageToEnemy(data: any) {
         // silently never doing anything. Fixed by matching the one
         // shape that already works everywhere else.
         io.emit("enemy-removed", targetId)
-        return log("not found enemy to be damaged, told the client to clean up its own ghost - ", targetId)
+        log("not found enemy to be damaged, told the client to clean up its own ghost - ", targetId)
+        return false
     }
     const dmgToApply = dmgDetails.weaponDmg ? dmgDetails.weaponDmg : dmgDetails.physicalDmg
     enemyTarg.hp -= dmgToApply
-    if(enemyTarg.hp <= 0) tcpEnemies = tcpEnemies.filter(enemy => enemy._id !== targetId)
+    const isLethal = enemyTarg.hp <= 0
+    if(isLethal) tcpEnemies = tcpEnemies.filter(enemy => enemy._id !== targetId)
     console.log(`enemy hp ${enemyTarg.hp} / ${enemyTarg.maxHp}`)
     // {...data, ...} is what carries a hit weapon's own effectsWhenHit
     // (client's characterstate.js dealDamageToEnemy, e.g. the Majestic
@@ -252,6 +265,7 @@ function applyDamageToEnemy(data: any) {
     // along for free with everything else in data, no explicit
     // destructuring/whitelisting needed here.
     io.emit("enemy-is-hit", {...data, dmgToApply, hp: enemyTarg.hp, maxHp: enemyTarg.maxHp})
+    return isLethal
 }
 
 // the ONE place an enemy's _targetId actually gets set, WITHOUT overwriting
@@ -718,6 +732,44 @@ io.on("connection", (socket: Socket) => {
                 enem.z = pos.z
             }
         })
+
+        // a real player's own hp lives entirely client-side (their own
+        // "enemy-attacked" handler deducts it locally, gated to
+        // data.targetId === their own charState.owner) - a bot has no
+        // client of its own to ever satisfy that check, so nothing was
+        // ever taking this damage off anywhere. The server has to be
+        // authoritative for a bot's hp instead, same reasoning BOT_MAX_HP's
+        // own comment gives.
+        const targetBot = bots.find(b => b.player.owner === data.targetId)
+        if(targetBot && targetBot.player.hp !== undefined){
+            targetBot.player.hp -= data.dmg
+            if(targetBot.player.hp <= 0){
+                targetBot.brain.destroy()
+                const deadOwner = targetBot.player.owner
+                const deadPlaceId = targetBot.player.currentPlace.placeId
+                bots = bots.filter(b => b.player.owner !== deadOwner)
+                players = players.filter(pl => pl.owner !== deadOwner)
+                tcpEnemies.forEach(enem => {
+                    if(enem._targetId === deadOwner){
+                        enem._targetId = false
+                        enem._isMoving = false
+                        enem._attacking = false
+                    }
+                })
+                // same broadcast a real player's own client sends itself
+                // via "will-die" on real death (see that handler above) -
+                // NOT "removeChar" (the disconnect/left-the-area cleanup
+                // path, which just instantly disposes the mesh with no
+                // animation - confirmed that's what a bot was doing before
+                // this). "player-death" is what drives worldsocket.js's own
+                // playerDied(): plays and freezes the "death" clip, THEN
+                // waits 5s before actually despawning the mesh - the exact
+                // same death sequence a real player's own death already
+                // gets, no new client code needed.
+                io.emit('player-death', { ownerId: deadOwner, currentPlaceId: deadPlaceId })
+            }
+        }
+
         io.emit("enemy-attacked", data)
     })
     // openworld's terrain is uneven and enemyDetails/genenemy.ts only ever seed
@@ -1102,6 +1154,17 @@ const BOT_CAST_SKILL = {
 // downstream reads an unexpected undefined field
 const BOT_CASTER_STATS = { weapon: 1, accuracy: 1, critical: 1, dex: 1, strength: 1, magic: 1, spd: 3.4, atkSpd: 0.9 }
 
+// a real player starts around lifeRandomHp+1000 (server/routes/characterR.js) -
+// a bot is a much lower-stakes "trash tier" fight by comparison (waterslime's
+// own dmg:5, forestDeer's own dmg:40 - a deer can meaningfully hurt one over
+// a real fight without this being a throwaway one-hit), not meant to survive
+// a real player-scale beating
+const BOT_MAX_HP = 300
+// per kill, flat - no real per-enemy exp curve to feed off (bots don't
+// track expToGain anywhere), just a simple, visible "it's getting
+// stronger" progression
+const BOT_LEVEL_UP_HP_BONUS = 100
+
 // picks a name no CURRENTLY ALIVE bot is already using - plain pickOne(BOT_NAMES)
 // let two different bots both land on "Marrow" (confirmed from an actual
 // screenshot), unreadable in world chat/nametags with no way to tell them
@@ -1211,6 +1274,8 @@ function spawnBot() {
         weaponBlocking: false,
         magicBlocking: false,
         IsInVulnerable: false,
+        hp: BOT_MAX_HP,
+        maxHp: BOT_MAX_HP,
     }
 
     players.push(botPlayer)
@@ -1295,7 +1360,7 @@ function spawnBot() {
             // whoever the enemy is already fighting, same guard the real
             // player path already enforces.
             const landHit = () => {
-                applyDamageToEnemy({
+                const isLethal = applyDamageToEnemy({
                     targetId,
                     dmgDetails,
                     playerId: owner,
@@ -1303,6 +1368,16 @@ function spawnBot() {
                     isPhysical: attitude.weapon > 0.5,
                 })
                 registerTargetIfNone(targetId, owner, botPlayer.pos)
+
+                // a kill levels the bot up - flat hp/maxHp bump, no other
+                // stat curve to feed off (bots don't carry a real
+                // strength/dex/etc progression the way a real character
+                // does)
+                if(isLethal){
+                    botPlayer.lvl += 1
+                    botPlayer.maxHp = (botPlayer.maxHp ?? BOT_MAX_HP) + BOT_LEVEL_UP_HP_BONUS
+                    botPlayer.hp = (botPlayer.hp ?? BOT_MAX_HP) + BOT_LEVEL_UP_HP_BONUS
+                }
             }
 
             // Melee-style bots (attitude.weapon > 0.5 - same threshold
