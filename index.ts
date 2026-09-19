@@ -1019,16 +1019,27 @@ function spawnBot() {
     players.push(botPlayer)
 
     const brain = new Brain(attitude, { x: spawnX, z: spawnZ }, (pos, dirTarg, mode, moving) => {
+        // botPlayer.pos kept in sync server-side (Brain's own internal
+        // tracking, useful if anything else ever wants "where does the
+        // server think this bot is"), but deliberately NOT sent to
+        // clients below anymore - see the emit comment just under this
         botPlayer.pos = pos
         botPlayer.dirTarg = dirTarg
         botPlayer.mode = mode
         botPlayer._moving = moving
-        // same event NAME/PAYLOAD SHAPE a real player's own "emitmove"/
-        // "emitStop" server handlers already broadcast - every connected
-        // client's worldsocket.js already knows exactly how to apply
-        // these (snap position, look at dirTarg, switch mode), no bot-
-        // aware branch needed anywhere client-side
-        io.emit(moving ? "emitted-moving" : "stopped", { ownerId: owner, pos, dirTarg, mode })
+        // like npc/enemy movement now, not the real-player snap-to-exact-
+        // position model this used to copy: clients get told y/direction/
+        // moving and do their OWN per-frame body.locallyTranslate()
+        // stepping (renderer.js's own new bot-movement branch), the same
+        // way enemy wander/chase already works, instead of the server
+        // computing and broadcasting an exact x/z every single tick. x/z
+        // is deliberately left OUT of this payload - a real player's
+        // "emitted-moving"/"stopped" still carry it (their own client is
+        // the position authority), a bot's shouldn't (Brain is the
+        // authority for gameplay decisions like combat range, but the
+        // VISUAL position is now each client's own local simulation, same
+        // trust level enemy movement already runs on).
+        io.emit(moving ? "bot-moving" : "bot-stopped", { ownerId: owner, y: pos.y, dirTarg, mode })
     }, {
         // tcpEnemies' own x/z is only refreshed at specific moments (an
         // attack/skill-cast/teleport landing - see enemyWillAttack et al

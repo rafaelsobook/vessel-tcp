@@ -35,12 +35,18 @@ export const ATTITUDE_PRESETS: Record<string, Attitude> = {
 }
 
 // real player pacing (client/src/controllers/inputMovement.js's own
-// walkSpeed:1/sprintSpeed:20) - reused verbatim so a bot moving at either
-// pace covers ground at the same rate a real player's own idle-walk or
-// fighting-sprint would, instead of an arbitrary bot-only speed that would
-// look wrong next to a real player standing beside it
+// walkSpeed:1/sprintSpeed:20) as the starting point - a bot moving at
+// WALK_SPEED covers ground at the same rate a real player's own idle-walk
+// does. SPRINT_SPEED is deliberately NOT the real 20 though - a bot
+// actually sprinting at real player speed read as too fast/frantic, cut by
+// 60% (20 * 0.4 = 8) on request. Must match client/src/sockets/renderer.js's
+// own BOT_SPRINT_SPEED exactly - that's what actually steps a bot's
+// position each frame, this is only what the server's own internal
+// simulation (arrival timing, combat range/cooldown pacing) assumes it's
+// moving at; if the two drift apart, the server's own "have I arrived
+// yet"/combat-engagement timing would stop matching what's rendered.
 const WALK_SPEED = 1
-const SPRINT_SPEED = 20
+const SPRINT_SPEED = 8
 
 // how often the brain re-decides what to do next ("outputs 0 to 1" - see
 // think() below) - randomized per-decision, not fixed, so a room full of
