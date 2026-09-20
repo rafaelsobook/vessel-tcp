@@ -11,6 +11,7 @@ import { generateSlimes, generateFireSlimes, generateElectricSlimes, generateMon
 import { startingTreasures } from "./recources/treasures"
 import { createWagon, WAGON_HEADINGS, createHarnessDeer, Tharnessdeer, Twagon } from "./recources/wagons"
 import { Brain, ATTITUDE_PRESETS, RESTING_Y } from "./recources/npcBrain"
+import { faker } from "@faker-js/faker"
 
 export const enemyLengthsInPlace = [
     {   
@@ -299,6 +300,32 @@ function registerTargetIfNone(enemyId: string, targetId: string, dirTarg: any) {
     enemyTarg._targetId = targetId
     enemyTarg._dirTarg = dirTarg
     io.emit("registered-playerAsEnemy", tcpEnemies)
+}
+
+// the "someone just died, release whoever was chasing them" half of that
+// same relationship - originally duplicated inline in both "will-die" (a
+// real player's own death) and the bot-death branch inside "enemyWillAttack"
+// below, pulled out the same way registerTargetIfNone/applyDamageToEnemy
+// already were. Resetting tcpEnemies alone was never enough on its own -
+// renderer.js's own chase-movement branch gates purely on an enemy's
+// _isMoving/_targetId, not on whether the target it looks up actually
+// still resolves to anything, so an already-connected client that never
+// heard about this reset kept replaying the running animation in place
+// forever even after its target vanished from playersOnScene (confirmed
+// from an actual report: a deer that had just killed a bot). Broadcasting
+// via "registered-playerAsEnemy" reuses the exact relay target ACQUISITION
+// already goes through - every client already has a handler for it, no new
+// event needed.
+function releaseEnemiesTargeting(deadOwnerId: string){
+    let anyReleased = false
+    tcpEnemies.forEach(enem => {
+        if(enem._targetId !== deadOwnerId) return
+        enem._targetId = false
+        enem._isMoving = false
+        enem._attacking = false
+        anyReleased = true
+    })
+    if(anyReleased) io.emit('registered-playerAsEnemy', tcpEnemies)
 }
 
 io.on("connection", (socket: Socket) => {
@@ -773,25 +800,7 @@ io.on("connection", (socket: Socket) => {
                 const deadPlaceId = targetBot.player.currentPlace.placeId
                 bots = bots.filter(b => b.player.owner !== deadOwner)
                 players = players.filter(pl => pl.owner !== deadOwner)
-                let anyEnemyReleased = false
-                tcpEnemies.forEach(enem => {
-                    if(enem._targetId === deadOwner){
-                        enem._targetId = false
-                        enem._isMoving = false
-                        enem._attacking = false
-                        anyEnemyReleased = true
-                    }
-                })
-                // see the "will-die" handler's own identical broadcast
-                // above for why this is needed - resetting tcpEnemies alone
-                // never told any already-connected client to actually stop
-                // chasing (renderer.js's own chase loop keeps replaying the
-                // running animation forever off its own stale local
-                // _isMoving/_targetId, even once its target lookup starts
-                // coming back empty) - confirmed from an actual report: a
-                // deer that just killed a bot kept "running" in place,
-                // never moving again.
-                if(anyEnemyReleased) io.emit('registered-playerAsEnemy', tcpEnemies)
+                releaseEnemiesTargeting(deadOwner)
                 // same broadcast a real player's own client sends itself
                 // via "will-die" on real death (see that handler above) -
                 // NOT "removeChar" (the disconnect/left-the-area cleanup
@@ -898,32 +907,8 @@ io.on("connection", (socket: Socket) => {
         if(theUzer){
 
             players = players.filter(user => user.owner !== ownerId)
-            let anyEnemyReleased = false
-            tcpEnemies.forEach(mon => {
-                if(mon._targetId === ownerId){
-                    mon._targetId = false
-                    mon._isMoving = false
-                    mon._attacking = false
-                    anyEnemyReleased = true
-                }
-            })
+            releaseEnemiesTargeting(ownerId)
             log("total of players after death " + players.length)
-            // this reset above was only ever applied to tcpEnemies itself -
-            // nothing told any ALREADY-CONNECTED client's own local copy of
-            // these specific enemies to stop chasing. renderer.js's own
-            // chase-movement branch gates on _isMoving/_targetId, not on
-            // whether the target it looks up actually still exists - once
-            // the dead player/bot is gone from playersOnScene, the lookup
-            // just silently returns nothing and the actual translate/lookAt
-            // skips itself, but the RUNNING animation right below it has no
-            // such guard and keeps looping forever, since the outer
-            // _isMoving/_targetId condition was never told it's now false.
-            // Confirmed from an actual report: an enemy that just killed a
-            // bot kept playing its running animation in place, never
-            // actually moving again. Reusing "registered-playerAsEnemy" (the
-            // same broadcast target ACQUISITION already uses) rather than a
-            // new event - every client already has a handler for it.
-            if(anyEnemyReleased) io.emit('registered-playerAsEnemy', tcpEnemies)
             io.emit('player-death', {ownerId: theUzer.owner, currentPlaceId})
         }
         
@@ -1040,6 +1025,36 @@ setInterval(() => {
     })
 }, WANDER_INTERVAL_MS)
 
+// SAFETY NET - every place that removes a player is SUPPOSED to also
+// release any enemy still targeting them AND broadcast that release (see
+// "will-die"/the bot-death branch in "enemyWillAttack" above, both patched
+// for this after an actual report: an enemy that just killed its target
+// kept replaying its running animation in place forever, since resetting
+// tcpEnemies locally never told any already-connected client to actually
+// stop chasing). Auditing every removal site for that is exactly the kind
+// of thing that's easy to get right today and silently miss tomorrow -
+// removeCharacter() (real disconnects/manual dispose) turned out to be a
+// THIRD spot with the same gap (resets _targetId, never _isMoving, never
+// broadcasts) while looking into this. Rather than keep patching call
+// sites one at a time, this just periodically verifies every enemy's own
+// _targetId still points at someone actually in `players` - self-healing
+// within ENEMY_TARGET_VALIDATION_INTERVAL_MS regardless of which removal
+// path (or a future one) forgot to clean up after itself.
+const ENEMY_TARGET_VALIDATION_INTERVAL_MS = 5000
+setInterval(() => {
+    let anyReleased = false
+    tcpEnemies.forEach(enem => {
+        if(!enem._targetId) return
+        const targetStillExists = players.some(pl => pl.owner === enem._targetId)
+        if(targetStillExists) return
+        enem._targetId = false
+        enem._isMoving = false
+        enem._attacking = false
+        anyReleased = true
+    })
+    if(anyReleased) io.emit('registered-playerAsEnemy', tcpEnemies)
+}, ENEMY_TARGET_VALIDATION_INTERVAL_MS)
+
 // BOT PLAYERS - AI-controlled fake players (recources/npcBrain.ts's own
 // Brain class), built to be indistinguishable from a real logged-in player
 // to every other connected client. The trick is that nothing client-side
@@ -1086,25 +1101,29 @@ const BOT_SPAWN_PLACES = [
     { placeId: 888, name: "openworld", areaType: "openworld", center: { x: 0, z: 500 }, radius: 40 },
 ]
 
-// MAX_BOTS-or-more entries on purpose (see pickBotName below) - with only
-// 10 names and up to 20 bots alive at once, duplicates were near-guaranteed
-// (confirmed from an actual screenshot: two different bots both named
-// "Marrow" joined back to back, unreadable in world chat).
-const BOT_NAMES = [
-    "Wren", "Talon", "Brisk", "Marrow", "Ashen", "Fennick", "Corvid", "Dusk", "Bramble", "Quill",
-    "Hollis", "Thistle", "Rowan", "Grael", "Nyx", "Fenwick", "Orin", "Larkin", "Sylas", "Brakk",
-]
 // known-good values, pulled straight off real npcDetails.js entries that
 // already render correctly today - NOT the full set of everything that
 // exists, just a safe pool guaranteed not to 404 a missing mesh/texture.
-// gender is always "male" on purpose: createcharacterpage.js's own comment
-// confirms female has no cloth/pants styles yet, so a female bot would be
-// stuck half-dressed - not worth the risk for a cosmetic randomization.
+// These are the MALE-side pool - createcharacter.js's own createAnimeBody
+// only ever reads cloth/pants/skinColor as STYLE CHOICES for a male body;
+// a female body has no equivalent style system at all (one fixed default
+// outfit - belt/blindfold/mask/skirt/bag/silverine, always on - and no
+// pants/cloth/skinColor variety), so these 3 pools are simply never
+// consulted for a female bot at all, not just harmless if passed.
 const BOT_HAIR = ["hair1", "hair2", "style1", "style2"]
 const BOT_CLOTH = ["style1", "style2", "style3"]
 const BOT_PANTS = ["style1", "style2"]
 const BOT_BOOTS = ["style1", "style2"]
 const BOT_SKIN = ["skin1", "skin2", "skin3", "skin4"]
+// female's own hair mesh-matching (createcharacter.js's createAnimeBody)
+// looks for a mesh literally named "femaile.hair1"/"female.hair2" (yes,
+// "femaile" - an existing typo baked into the actual asset) and compares
+// its own name.split(".")[1] against det.hair directly - "style1"/"style2"
+// (the male-only entries in BOT_HAIR above) match no such mesh at all, so
+// a female bot given one of those would just render bald. Hair color
+// still comes from the same shared BOT_COLORS pool either way (her hair
+// materials are built from det.hairColor same as male's).
+const BOT_FEMALE_HAIR = ["hair1", "hair2"]
 // real common-tier swordsData.js entries, hand-copied (tcp can't import
 // client/src/staticRecources/swordsdata.js directly - separate node
 // project) - createWeapon() needs a valid weaponType + parts shape to
@@ -1125,6 +1144,53 @@ const BOT_SWORDS = [
         parts: { bladeRarity: "common1", guardRarity: "common1", handleRarity: "common2", pommelRarity: "common1", bladeColor: "silver", guardColor: "silver", handleColor: "bone", pommelColor: "frostshard" },
     },
 ]
+// wanderersstaff (client/src/staticRecources/swordsdata.js) - the only
+// staff item that exists in the whole game right now (that file's own
+// comment: "only 'wood' is modeled today, so this is the only staff that
+// can exist"). A whole, undecomposed mesh (createWeapon's own
+// createWholeMeshWeapon), so parts is just the one handleColor field, not
+// the full blade/guard/handle/pommel shape BOT_SWORDS' own entries need.
+// Every caster bot gets this instead of a sword (see buildBotItems below) -
+// a staff reads as an actual caster's weapon, unlike a sword a caster-leaning
+// bot would otherwise be shown carrying but never really swinging.
+const BOT_STAFF = { name: "wanderersstaff", dn: "Wanderer's Staff", parts: { handleColor: "wood" } }
+// real helmet/hat entries, hand-copied from client/src/charactersystem/
+// inventory.js's own "give all items" catalog (npcDetails.js also
+// independently uses ironjaw/orionhelm/farmhat on real NPCs, confirming
+// these actually render). No item literally called "witch hat" exists
+// anywhere in the game's data - "lauriethat" (modelName "magicianhat", dn
+// "Lauriet's Hat") is the closest real thing to it, a proper pointed
+// wizard-style hat, kept as its own separate constant below so caster
+// bots can specifically be biased toward it instead of the general pool.
+const BOT_HELMETS = [
+    { name: "ironjaw", modelName: "ironjaw", dn: "Knight's Helm III" },
+    { name: "orionhelm", modelName: "orionhelm", dn: "Orion Helm" },
+    { name: "farmhat", modelName: "farmhat", dn: "Farmer's Hat" },
+    { name: "ironmask", modelName: "ironmask", dn: "Iron Mask", hairVisible: true },
+]
+const BOT_WITCH_HAT = { name: "lauriethat", modelName: "magicianhat", dn: "Lauriet's Hat" }
+// how often a CASTER bot specifically gets BOT_WITCH_HAT instead of a
+// plain roll off the general BOT_HELMETS pool above - "some of them", not
+// all, per spec. Melee bots never roll this at all (see buildBotItems),
+// keeping it a caster-only flavor.
+const BOT_WITCH_HAT_CHANCE = 0.5
+// tools/metalmat.js's own METAL_TINTS keys (tcp can't import that file
+// directly - separate node project, same reasoning BOT_SWORDS' own comment
+// gives) - every one of these actually resolves to a real tinted material,
+// not invented placeholder names.
+const BOT_METAL_COLORS = ["iron", "steel", "bronze", "silver", "gold", "mythril", "adamantine", "ruby", "dragonscale"]
+// real armor/pauldron entries, same "give all items" catalog BOT_HELMETS'
+// own comment sources from. Unlike helmets, createcharacter.js's own
+// equipArmor(itm.name, itm.metalColor)/equipPauldron(itm.name,
+// itm.metalColor) key off `name` directly - no separate modelName field
+// needed for either. Only one real pauldron model exists in the game's
+// data at all ("ironpaul"), so that one isn't a pool - just always that
+// name with a random metal color, same as armor/helmet get.
+const BOT_ARMORS = [
+    { name: "knightscale", dn: "Knight's Scale" },
+    { name: "lightarmor", dn: "Light Armor" },
+]
+const BOT_PAULDRON_NAME = "ironpaul"
 // {r,g,b} 0-1 floats, same shape/range client/src/constants/adventurerColors.js's
 // own ADVENTURER_COLORS palette already uses (a small hand-picked subset of
 // it, not imported directly - tcp is a separate node project from client,
@@ -1228,27 +1294,138 @@ const BOT_DASH_SKILL = {
 // over 1000ms works out to roughly 6x this bot's own BOT_WALK_SPEED (1) -
 // a fast, obvious dash, not a subtle nudge.
 const BOT_DASH_MOVE_DURATION_MS = 1000
-// singlecastSkill's own "particle" shape - the simplest/safest of every
-// offense skill's projectile styles to hand-copy (createParticleSystem only
-// ever reads skill.particleStyles/skill.name, nothing exotic like a weapon-
-// part assembly or a GLB model that could silently fail to resolve)
-const BOT_CAST_SKILL = {
-    name: "singlecast",
-    // see BOT_DASH_SKILL's own comment just above - same requirement
-    isActive: true,
-    lvl: 1,
-    element: "normal",
-    castDuration: 3,
-    demand: [],
-    effects: [{ effectType: "offense", dmgPm: 0, plusCasterMagicDmg: 0.6, plusDmg: 100, chance: 1, bashPower: 0.5 }],
-    explosionColor: "blue",
-    explosionScale: 1,
-    particleStyles: [{ name: "oneline", color: "blue" }],
-    projectileVisual: { useProjectile: true, visible: true, shape: "particle", material: { kind: "none" } },
-    onHitVisual: [{ type: "burst", burst: { texture: "drunkBubble", fireScale: 0.9, smokeScale: 0.7, emberEmitRate: 11, gravitySign: 1, includeSmoke: true } }],
-}
+// a POOL of real elemental basic-attack skills, one assigned per caster bot
+// at spawn (so it always casts the same flavor its whole life, not a
+// different random spell every attack) - previously every single caster
+// bot always cast the literal same "singlecast" bolt. Hand-copied
+// field-for-field from client/src/staticRecources/skillsData.js's own
+// singlecast/tidalspike/stoneshard/lightningbolt/flamebrand entries, same
+// trimming BOT_DASH_SKILL's own comment describes.
+//
+// Each entry's own name gets suffixed per-bot at emit time (see the
+// dealDamage callback below), same reasoning the old single-skill version
+// already needed (skillEffects.js's pendingCasts is keyed by name alone,
+// shared across every caster it ever sees). That suffix is only actually
+// SAFE for a skill whose projectileVisual doesn't derive any asset path
+// FROM skill.name - checked each of these individually:
+//  - particle (singlecast): reads particleStyles, never skill.name
+//  - no shape, beam-only onHit (tidalspike): its beam/burst texture paths
+//    are explicit literals, not skill.name-derived
+//  - glbModel (stoneshard): model.name + material.texturePath are both
+//    explicit fields, separate from skill.name
+//  - weapon (lightningbolt/flamebrand): built from pv.weapon's own
+//    explicit rarities/type, never skill.name
+// The ONE shape that WOULD break (a bare shape:"plane" skill relying on
+// the DEFAULT getGenericIconMat(scene, skill) icon-by-name lookup,
+// "./images/projectiles/<skill.name>projectile.webp") is deliberately not
+// in this pool.
+//
+// No real per-element damage-bonus wiring for bots yet (getWeaknessMultiplier,
+// skillEffects.js) - a bot's actual damage stays the flat, server-computed
+// CAST_DMG regardless of which element got picked here, since that
+// multiplier only ever runs inside the SAME isCaster-gated block that
+// never executes for a bot. This pool is purely visual variety for now.
+const BOT_CAST_SKILLS = [
+    {
+        name: "singlecast",
+        isActive: true,
+        lvl: 1,
+        element: "normal",
+        castDuration: 3,
+        demand: [],
+        effects: [{ effectType: "offense", dmgPm: 0, plusCasterMagicDmg: 0.6, plusDmg: 100, chance: 1, bashPower: 0.5 }],
+        explosionColor: "blue",
+        explosionScale: 1,
+        particleStyles: [{ name: "oneline", color: "blue" }],
+        projectileVisual: { useProjectile: true, visible: true, shape: "particle", material: { kind: "none" } },
+        onHitVisual: [{ type: "burst", burst: { texture: "drunkBubble", fireScale: 0.9, smokeScale: 0.7, emberEmitRate: 11, gravitySign: 1, includeSmoke: true } }],
+    },
+    {
+        name: "tidalspike",
+        isActive: true,
+        lvl: 1,
+        element: "water",
+        castDuration: 2,
+        demand: [],
+        effects: [{ effectType: "offense", dmgPm: 0, plusCasterMagicDmg: 0.5, plusDmg: 70, chance: 1, bashPower: 0.3 }],
+        explosionColor: "blue",
+        explosionScale: 1,
+        arcCount: 0,
+        projectileVisual: { useProjectile: true, visible: false, material: { kind: "none" } },
+        onHitVisual: [
+            { type: "beam", beam: { width: 0.5, lingerMs: 3000, texturePath: "./images/particles/watercurrent.webp", scrollSpeed: 0.6, uScale: 4 }, impactSound: "waterHitS" },
+            { type: "burst", burst: { texture: "splash", fireScale: 0.9, smokeScale: 0.7, emberEmitRate: 11, gravitySign: 1, includeSmoke: false } },
+        ],
+    },
+    {
+        name: "stoneshard",
+        isActive: true,
+        lvl: 1,
+        element: "earth",
+        castDuration: 2,
+        demand: [],
+        effects: [{ effectType: "offense", dmgPm: 0, plusCasterMagicDmg: 0.1, plusDmg: 75, chance: 1, bashPower: 0.35 }],
+        explosionColor: "green",
+        explosionScale: 1,
+        magicCircleImg: "apt_earth",
+        arcCount: 0,
+        projectileVisual: {
+            useProjectile: true, visible: true, shape: "glbModel",
+            model: { name: "stoneshard", scale: 1 },
+            copies: [{ rotation: { x: Math.PI / 2, y: 0, z: 0 } }],
+            material: { kind: "texture", texturePath: "./images/modeltex/rock1.jpg" },
+        },
+        onHitVisual: [{ type: "burst", burst: { texture: "rockTex", fireScale: 1.2, smokeScale: 1.3, emberEmitRate: 13, gravitySign: -1, includeSmoke: true } }],
+    },
+    {
+        name: "lightningbolt",
+        isActive: true,
+        lvl: 1,
+        element: "lightning",
+        castDuration: 2,
+        demand: [],
+        effects: [{ effectType: "offense", dmgPm: 0, plusCasterMagicDmg: 0.1, plusDmg: 70, chance: 1, bashPower: 0.3 }],
+        explosionColor: "yellow",
+        explosionScale: 1,
+        arcCount: 0,
+        projectileVisual: {
+            useProjectile: true, visible: false, shape: "weapon",
+            weapon: { type: "sword", rarities: { bladeRarity: "rare2", guardRarity: "rare1", handleRarity: "common1", pommelRarity: "common1" }, scale: 0.12 },
+            copies: [{ rotation: { x: Math.PI, y: 0, z: Math.PI / 2 } }],
+            material: { kind: "glow" },
+            arcs: { enabled: true, weaponGlow: false, width: 0.015, updateInterval: 90 },
+            launchSound: "spearS1",
+            speedMult: 2,
+        },
+        onHitVisual: [{ type: "burst", burst: { texture: "flare3", fireScale: 0.85, smokeScale: 0.6, emberEmitRate: 10, gravitySign: 1, includeSmoke: false }, stickBriefly: true, impactSound: "electricHitS" }],
+    },
+    {
+        name: "flamebrand",
+        isActive: true,
+        lvl: 1,
+        element: "fire",
+        castDuration: 2,
+        demand: [],
+        effects: [
+            { effectType: "offense", dmgPm: 0, plusCasterMagicDmg: 0.1, plusDmg: 70, chance: 1, bashPower: 0.3 },
+            { effectType: "burn", dmgPm: 30, duration: 4000, soundPlayPerDmg: "dmgpm" },
+        ],
+        explosionColor: "red",
+        explosionScale: 1,
+        arcCount: 0,
+        projectileVisual: {
+            useProjectile: true, visible: false, shape: "weapon",
+            weapon: { type: "sword", rarities: { bladeRarity: "rare2", guardRarity: "rare1", handleRarity: "common1", pommelRarity: "common1" }, scale: 0.12 },
+            copies: [{ rotation: { x: Math.PI, y: 0, z: Math.PI / 2 } }],
+            material: { kind: "glow" },
+            arcs: { enabled: true, weaponGlow: false, width: 0.015, updateInterval: 90 },
+            launchSound: "spearS1",
+        },
+        onHitVisual: [{ type: "burst", burst: { texture: "explodeTex", fireScale: 1, smokeScale: 1, emberEmitRate: 15, gravitySign: 1, includeSmoke: false }, stickBriefly: true, impactSound: "struckS" }],
+    },
+]
 // casterStats only ever feeds the isCaster-gated damage math inside
-// castOffenseSkill (see BOT_CAST_SKILL's own comment on why that never
+// castOffenseSkill (see BOT_CAST_SKILLS' own comment on why that never
 // actually runs for a bot) - same default new-character shape server/
 // routes/characterR.js hands a real fresh character, just so nothing
 // downstream reads an unexpected undefined field
@@ -1265,37 +1442,78 @@ const BOT_MAX_HP = 300
 // stronger" progression
 const BOT_LEVEL_UP_HP_BONUS = 100
 
-// picks a name no CURRENTLY ALIVE bot is already using - plain pickOne(BOT_NAMES)
-// let two different bots both land on "Marrow" (confirmed from an actual
-// screenshot), unreadable in world chat/nametags with no way to tell them
-// apart. Falls back to a random pick + numeric suffix only if every name in
-// the pool is already taken (BOT_NAMES has MAX_BOTS entries, so this should
-// never actually trigger, just a safety net if that ever changes).
-function pickBotName(): string {
+// @faker-js/faker instead of a small hand-written pool (was 20 fixed
+// fantasy-ish names - a hardcoded list this size guaranteed duplicates
+// once several bots were alive together, confirmed from an actual
+// screenshot: two different bots both named "Marrow" joined back to
+// back, unreadable in world chat). Takes the bot's own already-chosen
+// gender so the name actually matches its appearance (female characters
+// have a real, working rig now - see BOT_FEMALE_HAIR's own comment -
+// so there's no reason to force every bot's name through the male pool
+// anymore).
+// Still retries against currently-alive bots same as before: faker's own
+// name pools are much bigger than the old 20-entry list, but with up to
+// MAX_BOTS(20) alive at once, the birthday-paradox odds of SOME repeat
+// are still real, not negligible - capped at 20 attempts (never expected
+// to actually exhaust that) rather than looping forever.
+function pickBotName(gender: "male" | "female"): string {
     const taken = new Set(bots.map(b => b.player.name))
-    const free = BOT_NAMES.filter(n => !taken.has(n))
-    if(free.length) return pickOne(free)
-    return `${pickOne(BOT_NAMES)} ${randNumString().slice(0, 2)}`
+    let name = faker.person.firstName(gender)
+    for(let attempts = 0; taken.has(name) && attempts < 20; attempts++){
+        name = faker.person.firstName(gender)
+    }
+    return name
 }
 
-// a real, equipped common sword + boots - same full item shape a real
+// same "guaranteed unique, not just probably unique" reasoning
+// pickBotName's own header comment gives for names - randNumString()
+// (Math.random().toString().split(".")[1]) is astronomically unlikely to
+// repeat, but "unlikely" isn't "impossible", and `owner` is the actual
+// identity key everything (players/bots/tcpEnemies._targetId/sockets)
+// keys off - a collision there would be far worse than a duplicate
+// nametag. Checked against `players` (not just `bots`) since a bot's
+// owner has to be unique across every kind of connected identity, not
+// just other bots. Whether spawned by the periodic interval ("v") or the
+// on-demand debug spawn ("g"), both funnel through this same spawnBot(),
+// so both get this same guarantee for free.
+function generateUniqueBotOwner(): string {
+    let owner = `bot_${randNumString()}`
+    while(players.some(pl => pl.owner === owner)) owner = `bot_${randNumString()}`
+    return owner
+}
+
+// a real, equipped weapon + boots + helmet - same full item shape a real
 // swordsData.js/npcDetails.js item already uses (createCharacter's own
 // equip dispatch needs every one of these fields, not just name/itemType).
-// Every bot gets both regardless of attitude - a caster-leaning bot
-// visibly carrying a sheathed sword it rarely swings is normal enough (a
-// real adventurer keeps a sidearm even if they mostly cast), and this was
-// asked for unconditionally, not just for weapon-heavy attitudes.
-function buildBotItems(): any[] {
-    const sword = pickOne(BOT_SWORDS)
+// isCaster picks a wanderersstaff instead of a random sword - a caster
+// visibly carrying a sword it never really swings looked wrong once bots
+// actually started casting real skills; a staff reads as an actual
+// caster's weapon instead. Everyone still gets a real weapon regardless
+// (nothing goes empty-handed).
+function buildBotItems(isCaster: boolean): any[] {
+    const weaponType = isCaster ? "staff" : "sword"
+    const weapon = isCaster ? BOT_STAFF : pickOne(BOT_SWORDS)
+    // "some of them" per spec, not every caster - melee bots never roll
+    // this at all, keeping the witch/magician hat a caster-only flavor
+    const helmet = (isCaster && Math.random() < BOT_WITCH_HAT_CHANCE) ? BOT_WITCH_HAT : pickOne(BOT_HELMETS)
+    const helmetMetalColor = pickOne(BOT_METAL_COLORS)
+    // armor/pauldron - close-combat bots only, per spec (a caster reads as
+    // a robed spellcaster with just a staff + hat, not someone in plate).
+    // Each rolls its OWN independent metal color, same as the helmet does -
+    // a bot's armor and pauldron don't have to match each other or the
+    // helmet, real players mix-and-match sets too.
+    const armor = !isCaster ? pickOne(BOT_ARMORS) : null
+    const armorMetalColor = pickOne(BOT_METAL_COLORS)
+    const pauldronMetalColor = pickOne(BOT_METAL_COLORS)
     return [
         {
             itemId: `bot-item-${randNumString()}`,
-            name: sword.name,
-            dn: sword.dn,
+            name: weapon.name,
+            dn: weapon.dn,
             itemCateg: "equipable",
             itemType: "weapon",
-            weaponType: "sword",
-            equipAbilities: { dmg: 14, def: 0, magicDmg: 0, plusStr: 0, plusDex: 0, plusInt: 0 },
+            weaponType,
+            equipAbilities: { dmg: 14, def: 0, magicDmg: isCaster ? 12 : 0, plusStr: 0, plusDex: 0, plusInt: 0 },
             consumeAbilities: { plusHp: 0, plusMp: 0, plusSp: 0, plusDmg: 0, plusSpd: 0 },
             equiped: true,
             soulFeed: 0,
@@ -1306,7 +1524,7 @@ function buildBotItems(): any[] {
             price: { coinType: "bronze", pieces: 8 },
             qnty: 1,
             rarity: "common",
-            parts: sword.parts,
+            parts: weapon.parts,
         },
         {
             itemId: `bot-item-${randNumString()}`,
@@ -1325,6 +1543,71 @@ function buildBotItems(): any[] {
             qnty: 1,
             rarity: "common",
         },
+        {
+            itemId: `bot-item-${randNumString()}`,
+            name: helmet.name,
+            modelName: helmet.modelName,
+            dn: helmet.dn,
+            itemCateg: "equipable",
+            itemType: "helmet",
+            weaponType: undefined,
+            equipAbilities: { dmg: 0, def: 20, resistance: 10, magicDmg: 0, plusStr: 0, plusDex: 0, plusInt: 0 },
+            consumeAbilities: { plusHp: 0, plusMp: 0, plusSp: 0, plusDmg: 0, plusSpd: 1 },
+            equiped: true,
+            soulFeed: 0,
+            isEnhanceAble: true,
+            enhancedLevel: 0,
+            slots: [],
+            durability: { current: 100, max: 100 },
+            price: { coinType: "bronze", pieces: 20 },
+            qnty: 1,
+            rarity: "rare",
+            metalColor: helmetMetalColor,
+            hairVisible: (helmet as { hairVisible?: boolean }).hairVisible,
+        },
+        // armor/pauldron - melee only (armor is null for a caster) -
+        // spread out rather than an unconditional push so a caster's
+        // items array doesn't carry a name:null entry at all
+        ...(armor ? [{
+            itemId: `bot-item-${randNumString()}`,
+            name: armor.name,
+            dn: armor.dn,
+            itemCateg: "equipable",
+            itemType: "armor",
+            weaponType: undefined,
+            equipAbilities: { dmg: 0, def: 20, resistance: 10, magicDmg: 0, plusStr: 0, plusDex: 0, plusInt: 0 },
+            consumeAbilities: { plusHp: 0, plusMp: 0, plusSp: 0, plusDmg: 0, plusSpd: 1 },
+            equiped: true,
+            soulFeed: 0,
+            isEnhanceAble: true,
+            enhancedLevel: 0,
+            slots: [],
+            durability: { current: 100, max: 100 },
+            price: { coinType: "bronze", pieces: 45 },
+            qnty: 1,
+            rarity: "rare",
+            metalColor: armorMetalColor,
+        }] : []),
+        ...(!isCaster ? [{
+            itemId: `bot-item-${randNumString()}`,
+            name: BOT_PAULDRON_NAME,
+            dn: "Iron Pauldron",
+            itemCateg: "equipable",
+            itemType: "pauldron",
+            weaponType: undefined,
+            equipAbilities: { dmg: 0, def: 20, magicDmg: 0, plusStr: 0, plusDex: 0, plusInt: 0 },
+            consumeAbilities: { plusHp: 0, plusMp: 0, plusSp: 0, plusDmg: 0, plusSpd: 1 },
+            equiped: true,
+            soulFeed: 0,
+            isEnhanceAble: true,
+            enhancedLevel: 0,
+            slots: [],
+            durability: { current: 100, max: 100 },
+            price: { coinType: "bronze", pieces: 30 },
+            qnty: 1,
+            rarity: "rare",
+            metalColor: pauldronMetalColor,
+        }] : []),
     ]
 }
 
@@ -1338,9 +1621,28 @@ function buildBotItems(): any[] {
 function spawnBot(overrides?: { attitudeName?: string, pos?: { x: number, z: number }, currentPlace?: { placeId: number, name: string, areaType: string } }) {
     if (bots.length >= MAX_BOTS) return
 
-    const owner = `bot_${randNumString()}`
+    const owner = generateUniqueBotOwner()
     const attitudeNames = Object.keys(ATTITUDE_PRESETS)
     const attitude = ATTITUDE_PRESETS[overrides?.attitudeName ?? pickOne(attitudeNames)]
+    // picked ONCE per bot, same as its sword/attitude/etc below - a caster
+    // bot casts the same elemental flavor its whole life, not a different
+    // random spell every attack
+    const castSkillTemplate = pickOne(BOT_CAST_SKILLS)
+    // female characters have a real, working rig now (body + 2 hairstyles +
+    // one fixed always-on outfit - see BOT_FEMALE_HAIR's own comment for
+    // the full picture and why cloth/pants/skinColor don't need any
+    // gender-specific handling below despite only ever mattering for
+    // male). Bots only ever equip a sword + boots (buildBotItems) - never
+    // helmet/gauntlet/armor/pauldron, the one category of equipment
+    // actually known to clip/misalign on the female body rig (built for
+    // the male body's proportions) - so that risk doesn't apply here at all.
+    // faker's own SexType can also be "generic" - createcharacter.js's
+    // own createAnimeBody only ever checks `det.gender === "female"`,
+    // treating anything else as male regardless (isFemale = ...; if(!isFemale)
+    // det.gender = "male") - normalizing here matches that same fallback
+    // explicitly instead of relying on it silently
+    const rawSex = faker.person.sexType()
+    const gender: "male" | "female" = rawSex === "female" ? "female" : "male"
 
     let spawnX: number, spawnZ: number, spawnPlace: { placeId: number, name: string, areaType: string }
     if(overrides?.pos && overrides?.currentPlace){
@@ -1357,19 +1659,26 @@ function spawnBot(overrides?: { attitudeName?: string, pos?: { x: number, z: num
     }
 
     // same shape/fields a real join-world push builds (see that handler
-    // above) - items now include a real equipped sword + boots
+    // above) - items now include a real equipped weapon + boots + helmet
     // (buildBotItems), so hasWeapon is computed the exact same way a real
-    // join already does (data.items.some(...)), not hardcoded false
-    const botItems = buildBotItems()
+    // join already does (data.items.some(...)), not hardcoded false.
+    // isCaster gates weapon (staff vs sword) and helmet (witch/magician
+    // hat odds) - same attitude.weapon>0.5 threshold npcBrain.ts's own
+    // isMeleeStyle() uses, must stay in sync (it's the inverse: NOT melee)
+    const isCaster = attitude.weapon <= 0.5
+    const botItems = buildBotItems(isCaster)
     const botPlayer: Tplayers = {
         socketId: `bot-socket-${owner}`,
         owner,
-        name: pickBotName(),
+        name: pickBotName(gender),
         lvl: 1,
-        gender: "male",
+        gender,
+        // never actually rendered for a female body (createAnimeBody's own
+        // fixed-outfit branch) - harmless to keep drawing from the same
+        // male-oriented pools either way, see BOT_FEMALE_HAIR's own comment
         cloth: pickOne(BOT_CLOTH),
         pants: pickOne(BOT_PANTS),
-        hair: pickOne(BOT_HAIR),
+        hair: gender === "female" ? pickOne(BOT_FEMALE_HAIR) : pickOne(BOT_HAIR),
         boots: pickOne(BOT_BOOTS),
         clothColor: pickOne(BOT_COLORS) as any,
         pantsColor: pickOne(BOT_COLORS) as any,
@@ -1515,24 +1824,26 @@ function spawnBot(overrides?: { attitudeName?: string, pos?: { x: number, z: num
                 }
             }
 
+            // createcharacter.js only ever parents a weapon mesh onto rHand
+            // if mode==="fighting" AT CREATION TIME (see its own
+            // det.items.forEach block) - every bot spawns with mode "idle",
+            // so its weapon (sword OR staff) starts sheathed on
+            // weaponSocket regardless of style. Read once here so every
+            // branch below (melee's normal swing/dashstrike AND the
+            // caster's own cast) shares the same equipped weapon and can
+            // re-parent it onto rHand the same way.
+            const equippedWeapon = botItems.find(itm => itm.itemType === "weapon" && itm.equiped)
+            const weaponType = equippedWeapon?.weaponType ?? "sword"
+
             // Melee-style bots (attitude.weapon > 0.5 - same threshold
             // npcBrain.ts's own isMeleeStyle() uses, must stay in sync) get
             // dashstrikeSkill as their signature close-distance move;
             // everyone else gets a real long-distance projectile cast
             // instead of silently landing CAST_DMG with nothing visible -
-            // see BOT_DASH_SKILL/BOT_CAST_SKILL's own header comment for why
+            // see BOT_DASH_SKILL/BOT_CAST_SKILLS' own header comment for why
             // broadcasting a real "skillactivated" cast for a bot is safe
             // (never actually double-applies damage on any client).
             if(attitude.weapon > 0.5){
-                // createcharacter.js only ever parents the sword mesh onto
-                // rHand if mode==="fighting" AT CREATION TIME (see its own
-                // det.items.forEach block) - every bot spawns with mode
-                // "idle", so its sword starts sheathed on weaponSocket.
-                // Read once here so every branch below (normal swing AND
-                // dashstrike) shares the exact same equipped weapon.
-                const equippedWeapon = botItems.find(itm => itm.itemType === "weapon" && itm.equiped)
-                const weaponType = equippedWeapon?.weaponType ?? "sword"
-
                 // dashstrike as a rare flourish, not the bot's every swing -
                 // per spec, only a ~20% roll (Math.random() > 0.8) actually
                 // fires it; the other ~80% is just a plain sword/spear swing,
@@ -1546,7 +1857,7 @@ function spawnBot(overrides?: { attitudeName?: string, pos?: { x: number, z: num
                         ownerId: owner,
                         // per-bot-unique name (skillEffects.js's pendingCasts is
                         // keyed by this string alone, shared across EVERY
-                        // caster it ever sees - see BOT_CAST_SKILL's own
+                        // caster it ever sees - see BOT_CAST_SKILLS' own
                         // comment below for why the literal shared name is
                         // unsafe here) - dashstrike has no pendingCasts entry
                         // of its own (castDuration:0, nothing to track), so
@@ -1642,7 +1953,7 @@ function spawnBot(overrides?: { attitudeName?: string, pos?: { x: number, z: num
                     // Nothing else keys off the literal name (every cast
                     // dispatch/visual reads skill.effects/projectileVisual,
                     // not skill.name), so suffixing it is fully safe.
-                    skill: { ...BOT_CAST_SKILL, name: `${BOT_CAST_SKILL.name}_${owner}` },
+                    skill: { ...castSkillTemplate, name: `${castSkillTemplate.name}_${owner}` },
                     currentPlaceId: botPlayer.currentPlace.placeId,
                     casterStats: BOT_CASTER_STATS,
                     // see the melee branch's own identical field above - same
@@ -1650,20 +1961,33 @@ function spawnBot(overrides?: { attitudeName?: string, pos?: { x: number, z: num
                     // rotation" fix, now a plain angle instead of a point
                     dirYaw: botPlayer.dirYaw,
                     botTcpPos: botPlayer.pos,
+                    // re-parents the caster's own staff onto rHand, same
+                    // "createcharacter.js only equips onto rHand if
+                    // mode==='fighting' at CREATION time" gap the melee
+                    // branch's own bot-dashing payload already fixes for a
+                    // sword - a caster's mode is "casting", never
+                    // "fighting", so its staff would otherwise stay
+                    // sheathed on its back forever, never actually held
+                    // while casting
+                    weaponName: equippedWeapon?.name,
+                    parts: equippedWeapon?.parts,
+                    weaponType: equippedWeapon?.weaponType,
+                    metalColor: equippedWeapon?.metalColor,
                     // debug only - see the melee branch's own identical
                     // fields above for what this is for
                     debugTargetId: targetId,
                     debugTargetPos: liveTarget ? { x: liveTarget.x, z: liveTarget.z } : null,
                 })
-                // BOT_CAST_SKILL.castDuration (seconds) is how long every
+                // castSkillTemplate.castDuration (seconds) is how long every
                 // client's own castOffenseSkill sits on the magic circle
                 // before it actually looses the bolt - landing the real
                 // damage on that same delay (instead of instantly, like
                 // melee above) is what keeps the enemy's hp bar dropping
                 // roughly in sync with the bolt's own visible impact
                 // instead of several seconds before any client even shows
-                // an explosion
-                setTimeout(landHit, BOT_CAST_SKILL.castDuration * 1000)
+                // an explosion. Per-skill now (2-3s depending which one this
+                // bot got assigned), not a single hardcoded value.
+                setTimeout(landHit, castSkillTemplate.castDuration * 1000)
             }
         },
     }, botItems.some(itm => itm.itemType === "weapon" && itm.equiped))
