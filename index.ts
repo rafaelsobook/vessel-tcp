@@ -1497,6 +1497,7 @@ function spawnBot(overrides?: { attitudeName?: string, pos?: { x: number, z: num
                         // client-rendered position has drifted from what the
                         // server believes it is
                         dirYaw: botPlayer.dirYaw,
+                        botTcpPos: botPlayer.pos,
                         // debug only - lets worldsocket.js's own matching
                         // [clientBotAim] log reference the EXACT same
                         // target/position this tick's own [botAim] server
@@ -1530,6 +1531,7 @@ function spawnBot(overrides?: { attitudeName?: string, pos?: { x: number, z: num
                         parts: equippedWeapon?.parts,
                         weaponType: equippedWeapon?.weaponType,
                         metalColor: equippedWeapon?.metalColor,
+                        botTcpPos: botPlayer.pos
                     })
                     // damage lands once the dash has had time to actually reach
                     // the target, same reasoning performOpponentDashStrike's own
