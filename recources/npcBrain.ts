@@ -143,7 +143,18 @@ const CAST_COOLDOWN_MS = 3200
 const MELEE_DMG = 18
 const CAST_DMG = 32
 
-export type EnemyLike = { _id: string, x: number, z: number, hp: number }
+// approachX/approachZ (optional) - a per-bot-unique point NEAR the enemy
+// (not its exact center) to walk toward WHILE still closing the distance,
+// so several bots targeting the SAME enemy spread into a rough ring around
+// it instead of all beelining for the identical coordinate and visually
+// stacking into one merged mesh (confirmed from an actual screenshot -
+// same class of problem duelSystem.js/renderer.js's own enemy-separation
+// pass already solved for multiple ENEMIES converging on one player, just
+// the reverse direction here). index.ts's own getNearestEnemy is what
+// actually computes these (it has the cross-bot visibility this file
+// deliberately doesn't) - checkCombat below just uses them if present,
+// falling back to the enemy's own x/z if not.
+export type EnemyLike = { _id: string, x: number, z: number, hp: number, approachX?: number, approachZ?: number }
 export type DealDamageCallback = (targetId: string, dmgDetails: { physicalDmg: number, weaponDmg: number }) => void
 // closest enemy ANYWHERE in the bot's own place, no distance cap at all -
 // null if that place currently has none. The single source of truth for
@@ -350,10 +361,23 @@ export class Brain {
             // matching the SPRINT_SPEED this same branch sets server-side;
             // a caster-style bot chasing at "casting"+walk speed would
             // desync from what the server's own arrival timing assumes.
+            // approachX/approachZ (index.ts's own getNearestEnemy) - a point
+            // NEAR the enemy, not its exact center, so several bots sharing
+            // this same target spread into a ring instead of all beelining
+            // for the identical coordinate. Falls back to the enemy's own
+            // x/z if absent (e.g. a future caller that doesn't compute
+            // one) - moveArriveRadius only tightens to ARRIVE_RADIUS when
+            // there's an actual approach point to arrive AT precisely;
+            // walking straight at the enemy's raw center still wants the
+            // old range-wide tolerance (stop as soon as within attack range,
+            // don't walk needlessly closer).
+            const hasApproachPoint = target.approachX !== undefined && target.approachZ !== undefined
+            const approachX = target.approachX ?? target.x
+            const approachZ = target.approachZ ?? target.z
             this.mode = "fighting"
-            this.target = { x: target.x, z: target.z }
-            this.moveArriveRadius = range
-            this.arrive.target.set(target.x, 0, target.z)
+            this.target = { x: approachX, z: approachZ }
+            this.moveArriveRadius = hasApproachPoint ? ARRIVE_RADIUS : range
+            this.arrive.target.set(approachX, 0, approachZ)
             this.arrive.active = true
             this.vehicle.maxSpeed = SPRINT_SPEED
             this.moving = true

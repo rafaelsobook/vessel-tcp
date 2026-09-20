@@ -773,13 +773,25 @@ io.on("connection", (socket: Socket) => {
                 const deadPlaceId = targetBot.player.currentPlace.placeId
                 bots = bots.filter(b => b.player.owner !== deadOwner)
                 players = players.filter(pl => pl.owner !== deadOwner)
+                let anyEnemyReleased = false
                 tcpEnemies.forEach(enem => {
                     if(enem._targetId === deadOwner){
                         enem._targetId = false
                         enem._isMoving = false
                         enem._attacking = false
+                        anyEnemyReleased = true
                     }
                 })
+                // see the "will-die" handler's own identical broadcast
+                // above for why this is needed - resetting tcpEnemies alone
+                // never told any already-connected client to actually stop
+                // chasing (renderer.js's own chase loop keeps replaying the
+                // running animation forever off its own stale local
+                // _isMoving/_targetId, even once its target lookup starts
+                // coming back empty) - confirmed from an actual report: a
+                // deer that just killed a bot kept "running" in place,
+                // never moving again.
+                if(anyEnemyReleased) io.emit('registered-playerAsEnemy', tcpEnemies)
                 // same broadcast a real player's own client sends itself
                 // via "will-die" on real death (see that handler above) -
                 // NOT "removeChar" (the disconnect/left-the-area cleanup
@@ -886,14 +898,32 @@ io.on("connection", (socket: Socket) => {
         if(theUzer){
 
             players = players.filter(user => user.owner !== ownerId)
+            let anyEnemyReleased = false
             tcpEnemies.forEach(mon => {
                 if(mon._targetId === ownerId){
                     mon._targetId = false
                     mon._isMoving = false
                     mon._attacking = false
+                    anyEnemyReleased = true
                 }
             })
             log("total of players after death " + players.length)
+            // this reset above was only ever applied to tcpEnemies itself -
+            // nothing told any ALREADY-CONNECTED client's own local copy of
+            // these specific enemies to stop chasing. renderer.js's own
+            // chase-movement branch gates on _isMoving/_targetId, not on
+            // whether the target it looks up actually still exists - once
+            // the dead player/bot is gone from playersOnScene, the lookup
+            // just silently returns nothing and the actual translate/lookAt
+            // skips itself, but the RUNNING animation right below it has no
+            // such guard and keeps looping forever, since the outer
+            // _isMoving/_targetId condition was never told it's now false.
+            // Confirmed from an actual report: an enemy that just killed a
+            // bot kept playing its running animation in place, never
+            // actually moving again. Reusing "registered-playerAsEnemy" (the
+            // same broadcast target ACQUISITION already uses) rather than a
+            // new event - every client already has a handler for it.
+            if(anyEnemyReleased) io.emit('registered-playerAsEnemy', tcpEnemies)
             io.emit('player-death', {ownerId: theUzer.owner, currentPlaceId})
         }
         
@@ -1108,6 +1138,31 @@ const BOT_COLORS = [
     { r: 0.42, g: 0.30, b: 0.16 },
 ]
 const pickOne = <T>(arr: T[]): T => arr[Math.floor(Math.random() * arr.length)]
+
+// npcBrain.ts's own EnemyLike.approachX/approachZ - a stable per-bot angle
+// around any enemy it ever engages, derived from its own owner id (no
+// cross-bot bookkeeping needed at all: two DIFFERENT bots naturally land on
+// two DIFFERENT angles just because their owner strings differ, and the
+// SAME bot always gets the SAME angle every tick, so it doesn't jitter/
+// re-slot mid-fight). Not perfectly evenly spaced around the circle the
+// way a real formation-slot system would guarantee, but good enough to
+// stop several bots sharing one target from all beelining for its exact
+// center and visually merging into one mesh (confirmed from an actual
+// screenshot) - the actual goal here, not a precise tactical formation.
+function hashOwnerToAngle(owner: string): number {
+    let hash = 0
+    for(let i = 0; i < owner.length; i++) hash = (hash * 31 + owner.charCodeAt(i)) % 360
+    return (hash / 360) * Math.PI * 2
+}
+// roughly npcBrain.ts's own MELEE_RANGE(2.5)/CAST_RANGE(10), scaled a
+// little inward (~0.85-0.9x) - not imported directly (Brain deliberately
+// exposes neither constant, staying a pure/standalone class), just close
+// enough that a bot's approach point already sits just inside its own real
+// attack range, so checkCombat's own separate range check usually confirms
+// "in range" on the very next tick after arriving instead of needing a
+// visible extra correction hop.
+const BOT_MELEE_APPROACH_RADIUS = 2.2
+const BOT_CAST_APPROACH_RADIUS = 9
 
 // BOT SKILL VISUALS - close-distance ("melee") bots get dashstrikeSkill's
 // own signature move, long-distance ("caster") bots get a real projectile
@@ -1398,7 +1453,19 @@ function spawnBot(overrides?: { attitudeName?: string, pos?: { x: number, z: num
                         closest = { _id: enem._id, x: enem.x, z: enem.z, hp: enem.hp }
                     }
                 })
-            return closest
+            if(!closest) return null
+            // approachX/approachZ - see hashOwnerToAngle's own header
+            // comment for why this alone is enough to spread several bots
+            // sharing one target into a rough ring instead of all
+            // beelining for its exact center
+            const angle = hashOwnerToAngle(owner)
+            const approachRadius = attitude.weapon > 0.5 ? BOT_MELEE_APPROACH_RADIUS : BOT_CAST_APPROACH_RADIUS
+            const foundClosest = closest
+            return {
+                ...foundClosest,
+                approachX: foundClosest.x + Math.cos(angle) * approachRadius,
+                approachZ: foundClosest.z + Math.sin(angle) * approachRadius,
+            }
         },
         // same applyDamageToEnemy() every real player's own "enemyIsHit"
         // handler already goes through (see that function's own header
