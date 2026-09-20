@@ -88,6 +88,14 @@ type Tplayers = {
     // real player is. Undefined for every real Tplayers entry.
     hp?: number,
     maxHp?: number,
+    // bot-only, ongoing facing (radians, Y-axis only) - see
+    // BotMoveCallback's own header comment (recources/npcBrain.ts) for why
+    // this is a plain angle and not a dirTarg point. dirTarg above stays a
+    // one-time creation-time value for bots too (createcharacter.js's own
+    // initial-facing computation still needs a point, but only ever reads
+    // it once, at the same moment spawnPos is fresh/non-drifted) - this is
+    // what every ONGOING update after that uses instead.
+    dirYaw?: number,
 }
 
 // matches treasures.ts's createSwordTreasure return shape - itemDetail kept
@@ -340,6 +348,22 @@ io.on("connection", (socket: Socket) => {
     safeOn(socket, "toggle-spawn-bots", () => {
         spawnBotsEnabled = !spawnBotsEnabled
         console.log(`[bots] spawning ${spawnBotsEnabled ? "ENABLED" : "disabled"}`)
+    })
+    // debug convenience - drops exactly one caster-attitude bot right next
+    // to whoever pressed the key (inputMovement.js's own "g" debug key),
+    // instead of waiting on the random 5s interval/random place/random
+    // attitude the toggle above otherwise relies on. Small random offset
+    // so it doesn't spawn literally overlapping the requester's own body.
+    safeOn(socket, "spawn-bot-near-me", data => {
+        const angle = Math.random() * Math.PI * 2
+        spawnBot({
+            attitudeName: "caster",
+            pos: {
+                x: data.pos.x + Math.cos(angle) * BOT_BESIDE_OFFSET_DIST,
+                z: data.pos.z + Math.sin(angle) * BOT_BESIDE_OFFSET_DIST,
+            },
+            currentPlace: data.currentPlace,
+        })
     })
 
     // client's sockets/botSensor.js - see obstaclesByPlace's own comment
@@ -772,6 +796,23 @@ io.on("connection", (socket: Socket) => {
 
         io.emit("enemy-attacked", data)
     })
+    // coarse, throttled ping from a client's own chase loop (renderer.js,
+    // emitEnemyChasePosition's own header comment) - chase movement itself
+    // stays deliberately client-local/unsynced (that file's own header
+    // comment on why), this just keeps tcpEnemies' x/z reasonably fresh
+    // for anything that reads it BETWEEN real report moments (attacks/
+    // wander/skill-casts) - bots hunting/aiming via getNearestEnemy
+    // (npcBrain.ts) being the actual reason this exists (a caster bot was
+    // aiming at wherever a chasing enemy last attacked FROM, not where
+    // it's actually walking to right now). Not rebroadcast - every OTHER
+    // client already runs this exact same chase simulation independently
+    // and doesn't need correcting from someone else's report.
+    safeOn(socket, "enemyChasePosition", data => {
+        const enem = tcpEnemies.find(enem => enem._id === data._id)
+        if(!enem) return
+        enem.x = data.x
+        enem.z = data.z
+    })
     // openworld's terrain is uneven and enemyDetails/genenemy.ts only ever seed
     // y:0 - clients periodically verify/correct an enemy's y against the real
     // terrain height (see createEnemy.js) and report it here so tcpEnemies (and
@@ -986,6 +1027,10 @@ setInterval(() => {
 // reimplemented here.
 const MAX_BOTS = 20 // safety cap - "spawn one every 5s forever" would otherwise never stop
 const BOT_SPAWN_INTERVAL_MS = 5000
+// "spawn-bot-near-me" debug handler's own small random offset - far enough
+// that the new bot's body doesn't spawn literally overlapping the
+// requesting player's own
+const BOT_BESIDE_OFFSET_DIST = 2.5
 // one candidate place per entry - spawnBot() below picks one at random
 // each tick, so bots gradually populate every listed place instead of only
 // ever the first one. openworld's center is OPENWORLD_SLIME_TERRITORY's own
@@ -1228,18 +1273,33 @@ function buildBotItems(): any[] {
     ]
 }
 
-function spawnBot() {
+// overrides lets a caller pin down exactly who/where/what instead of the
+// periodic spawn interval's own fully-random pick (attitude, place, and
+// position within that place's radius) - used by the "spawn-bot-near-me"
+// debug handler below to drop one specific-attitude bot at one exact spot
+// on demand, without duplicating everything else spawnBot already does
+// (item building, Brain construction, the whole dealDamage callback, the
+// join broadcast).
+function spawnBot(overrides?: { attitudeName?: string, pos?: { x: number, z: number }, currentPlace?: { placeId: number, name: string, areaType: string } }) {
     if (bots.length >= MAX_BOTS) return
 
     const owner = `bot_${randNumString()}`
     const attitudeNames = Object.keys(ATTITUDE_PRESETS)
-    const attitude = ATTITUDE_PRESETS[pickOne(attitudeNames)]
+    const attitude = ATTITUDE_PRESETS[overrides?.attitudeName ?? pickOne(attitudeNames)]
 
-    const place = pickOne(BOT_SPAWN_PLACES)
-    const angle = Math.random() * Math.PI * 2
-    const dist = Math.random() * place.radius
-    const spawnX = place.center.x + Math.cos(angle) * dist
-    const spawnZ = place.center.z + Math.sin(angle) * dist
+    let spawnX: number, spawnZ: number, spawnPlace: { placeId: number, name: string, areaType: string }
+    if(overrides?.pos && overrides?.currentPlace){
+        spawnX = overrides.pos.x
+        spawnZ = overrides.pos.z
+        spawnPlace = overrides.currentPlace
+    } else {
+        const place = pickOne(BOT_SPAWN_PLACES)
+        const angle = Math.random() * Math.PI * 2
+        const dist = Math.random() * place.radius
+        spawnX = place.center.x + Math.cos(angle) * dist
+        spawnZ = place.center.z + Math.sin(angle) * dist
+        spawnPlace = { placeId: place.placeId, name: place.name, areaType: place.areaType }
+    }
 
     // same shape/fields a real join-world push builds (see that handler
     // above) - items now include a real equipped sword + boots
@@ -1261,7 +1321,7 @@ function spawnBot() {
         hairColor: pickOne(BOT_COLORS) as any,
         skinColor: pickOne(BOT_SKIN),
         race: "human",
-        currentPlace: { placeId: place.placeId, name: place.name, areaType: place.areaType },
+        currentPlace: spawnPlace,
         _moving: false,
         _minning: false,
         _attacking: false,
@@ -1280,13 +1340,13 @@ function spawnBot() {
 
     players.push(botPlayer)
 
-    const brain = new Brain(attitude, { x: spawnX, z: spawnZ }, (pos, dirTarg, mode, moving) => {
+    const brain = new Brain(attitude, { x: spawnX, z: spawnZ }, (pos, dirYaw, mode, moving) => {
         // botPlayer.pos kept in sync server-side (Brain's own internal
         // tracking, useful if anything else ever wants "where does the
         // server think this bot is"), but deliberately NOT sent to
         // clients below anymore - see the emit comment just under this
         botPlayer.pos = pos
-        botPlayer.dirTarg = dirTarg
+        botPlayer.dirYaw = dirYaw
         botPlayer.mode = mode
         botPlayer._moving = moving
         // like npc/enemy movement now, not the real-player snap-to-exact-
@@ -1301,7 +1361,15 @@ function spawnBot() {
         // authority for gameplay decisions like combat range, but the
         // VISUAL position is now each client's own local simulation, same
         // trust level enemy movement already runs on).
-        io.emit(moving ? "bot-moving" : "bot-stopped", { ownerId: owner, y: pos.y, dirTarg, mode })
+        //
+        // dirYaw (a plain angle), NOT the old dirTarg point - see
+        // BotMoveCallback's own header comment (npcBrain.ts) for why a
+        // point-based facing target silently breaks the moment a bot's
+        // client-rendered position drifts from what THIS server believes
+        // it is (confirmed via live matching server/client console logs).
+        // worldsocket.js's own "bot-moving"/"bot-stopped" apply this
+        // directly via Quaternion.RotationAxis, no lookAt/position involved.
+        io.emit(moving ? "bot-moving" : "bot-stopped", { ownerId: owner, y: pos.y, dirYaw, mode })
     }, {
         // tcpEnemies' own x/z is only refreshed at specific moments (an
         // attack/skill-cast/teleport landing - see enemyWillAttack et al
@@ -1422,11 +1490,21 @@ function spawnBot() {
                         casterStats: BOT_CASTER_STATS,
                         // re-faces the caster ONE more time, client-side, in the
                         // exact same synchronous "skillactivated" handler that's
-                        // about to read the body's facing to aim the cast - see
-                        // that handler's own comment for why this closes a real
-                        // gap the separate, earlier "bot-stopped" broadcast
-                        // (which already set this same dirTarg) left open
-                        dirTarg: botPlayer.dirTarg,
+                        // about to read the body's facing to aim the cast - a
+                        // plain angle now (dirYaw), not a dirTarg point - see
+                        // BotMoveCallback's own header comment (npcBrain.ts)
+                        // for why a point silently breaks once this bot's
+                        // client-rendered position has drifted from what the
+                        // server believes it is
+                        dirYaw: botPlayer.dirYaw,
+                        // debug only - lets worldsocket.js's own matching
+                        // [clientBotAim] log reference the EXACT same
+                        // target/position this tick's own [botAim] server
+                        // log just printed, so the two can be diffed
+                        // side by side instead of guessing which enemy a
+                        // given cast was even aimed at
+                        debugTargetId: targetId,
+                        debugTargetPos: liveTarget ? { x: liveTarget.x, z: liveTarget.z } : null,
                     })
                     // dashstrikeSkill's own real castDashSkill is entirely
                     // PLAYER-shaped (physics impulse/isCaster-gated), which is
@@ -1500,8 +1578,13 @@ function spawnBot() {
                     casterStats: BOT_CASTER_STATS,
                     // see the melee branch's own identical field above - same
                     // "re-face right before this exact cast reads the body's
-                    // rotation" fix, same reasoning
-                    dirTarg: botPlayer.dirTarg,
+                    // rotation" fix, now a plain angle instead of a point
+                    dirYaw: botPlayer.dirYaw,
+                    botTcpPos: botPlayer.pos,
+                    // debug only - see the melee branch's own identical
+                    // fields above for what this is for
+                    debugTargetId: targetId,
+                    debugTargetPos: liveTarget ? { x: liveTarget.x, z: liveTarget.z } : null,
                 })
                 // BOT_CAST_SKILL.castDuration (seconds) is how long every
                 // client's own castOffenseSkill sits on the magic circle

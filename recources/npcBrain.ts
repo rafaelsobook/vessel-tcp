@@ -162,9 +162,31 @@ const clamp01 = (n: number) => Math.max(0, Math.min(1, n))
 // identical moment every time
 const jitter = () => (Math.random() - 0.5) * 0.3
 
+// dirYaw (radians, Y-axis only) - NOT a dirTarg point. A point-based
+// facing target only works when whoever applies it (client's own
+// body.lookAt) is standing at the SAME position this was computed
+// relative to - true for a real player (client/index.ts's own
+// "emitted-moving"/"stopped" SNAP that client's body.position directly
+// from the server's own reported pos, so there's never a mismatch), but
+// NOT true for a bot: renderer.js's own per-frame bot-stepping is a
+// simple constant-speed locallyTranslate, completely independent of this
+// Brain's own richer yuka steering/deceleration/obstacle-avoidance
+// simulation, so a bot's CLIENT-rendered position drifts from what THIS
+// class believes it is. lookAt(dirTargPoint) computed from the client's
+// own (drifted) position produces a badly wrong angle - confirmed via
+// live matching server/client console logs (client's own
+// bodyPos-to-dirTarg direction matched its rendered facing exactly, but
+// diverged sharply from the direction this class itself would have
+// computed using ITS OWN position, by however far the two had drifted
+// apart - worse the closer the target, since CAST_RANGE is only 10 units).
+// A pure angle sidesteps this entirely: index.ts's own onMove callback
+// sends it straight through, and worldsocket.js applies it directly via
+// Quaternion.RotationAxis(Vector3.Up(), dirYaw) - no position of any
+// kind involved in reconstructing the rotation, so client-side drift
+// can't corrupt it.
 export type BotMoveCallback = (
     pos: { x: number, y: number, z: number },
-    dirTarg: { x: number, y: number, z: number },
+    dirYaw: number,
     mode: string,
     moving: boolean,
 ) => void
@@ -303,7 +325,11 @@ export class Brain {
                 this.arrive.active = false
                 this.vehicle.velocity.set(0, 0, 0)
                 this.mode = "idle"
-                this.onMove({ x: p.x, y: RESTING_Y, z: p.z }, { x: p.x, y: RESTING_Y, z: p.z + 1 }, this.mode, false)
+                // arbitrary "face world +Z" placeholder, same as stop()'s
+                // own identical fallback - there's no meaningful facing
+                // left to report once the hunt is over, this just avoids
+                // sending a stale/undefined angle
+                this.onMove({ x: p.x, y: RESTING_Y, z: p.z }, 0, this.mode, false)
             }
             return
         }
@@ -360,9 +386,15 @@ export class Brain {
         this.vehicle.velocity.set(0, 0, 0)
 
         const facing = dist > 0.01 ? { x: dx / dist, z: dz / dist } : { x: 0, z: 1 }
+        // same atan2(x,z) yaw convention client/src/charactersystem/
+        // createcharacter.js's own creation-time facing already uses
+        // (Math.atan2(dx, dz)) - matching it here isn't load-bearing on
+        // its own (any consistent convention would round-trip fine as
+        // long as both ends agree), just avoids inventing a second one
+        const dirYaw = Math.atan2(facing.x, facing.z)
         this.onMove(
             { x: p.x, y: RESTING_Y, z: p.z },
-            { x: p.x + facing.x, y: RESTING_Y, z: p.z + facing.z },
+            dirYaw,
             this.mode,
             false,
         )
@@ -487,14 +519,11 @@ export class Brain {
         this.mode = "idle"
 
         const p = this.vehicle.position
-        // dirTarg.y MUST match pos.y here (unlike the tickMove() case just
-        // below) - worldsocket.js's own "emitted-moving" handler flattens
-        // dirTarg.y to the body's own current y before calling lookAt, but
-        // its "stopped" handler does NOT, it uses dirTarg.y exactly as
-        // sent. Sending y:0 here while pos.y is RESTING_Y (>0) pointed
-        // lookAt at a target BELOW the bot's own feet - confirmed from an
-        // actual screenshot, bots stopped bent over staring at the ground.
-        this.onMove({ x: p.x, y: RESTING_Y, z: p.z }, { x: p.x, y: RESTING_Y, z: p.z + 1 }, this.mode, false)
+        // arbitrary "face world +Z" placeholder (dirYaw:0) - a wandering
+        // bot arriving at a plain waypoint has no real target to face, same
+        // reasoning checkCombat's own "hunt just ended" branch gives for
+        // its identical fallback
+        this.onMove({ x: p.x, y: RESTING_Y, z: p.z }, 0, this.mode, false)
     }
 
     private tickMove(){
@@ -535,14 +564,9 @@ export class Brain {
             ? { x: v.x / speed, z: v.z / speed }
             : { x: dx / Math.hypot(dx, dz), z: dz / Math.hypot(dx, dz) }
 
-        // dirTarg.y: RESTING_Y (not 0) here too - "emitted-moving" happens
-        // to flatten dirTarg.y to the body's own y itself, so this was
-        // harmless while moving, but sending a truthful, level dirTarg
-        // instead of relying on that client-side flattening is the more
-        // correct/defensive shape to actually be emitting either way
         this.onMove(
             { x: p.x, y: RESTING_Y, z: p.z },
-            { x: p.x + facing.x, y: RESTING_Y, z: p.z + facing.z },
+            Math.atan2(facing.x, facing.z),
             this.mode,
             true,
         )
