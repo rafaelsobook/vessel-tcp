@@ -55,6 +55,17 @@ process.on("uncaughtException", (error) => {
     console.error("[uncaughtException]", error)
 })
 
+// bot-only "what is this bot ultimately working toward" - "leveling"
+// tracks real kills (landHit's own level-up hook increments it), while
+// "minning"/"chopwoods" are tracked here already but have no corresponding
+// BEHAVIOR yet (bots don't actually mine or chop wood at all right now) -
+// a bot given one of those goals just sits at current:0 until that's
+// built. afterGoalCateg is a fixed 3-way rotation (leveling -> minning ->
+// chopwoods -> leveling -> ...), not randomized, so progression stays
+// predictable/easy to reason about.
+type BotGoalCateg = "leveling" | "minning" | "chopwoods"
+type BotGoal = { categ: BotGoalCateg, current: number, goal: number, afterGoalCateg: BotGoalCateg }
+
 type Tplayers = {
     socketId: string
     owner: string,
@@ -97,6 +108,42 @@ type Tplayers = {
     // it once, at the same moment spawnPos is fresh/non-drifted) - this is
     // what every ONGOING update after that uses instead.
     dirYaw?: number,
+    // bot-only - which ATTITUDE_PRESETS key this bot was given (the preset
+    // OBJECT itself, `attitude`, is only ever held in spawnBot()'s own
+    // closure, thrown away otherwise) - kept here specifically so the
+    // goal-check interval can ask "is this one the lazy preset" from
+    // outside that closure.
+    attitudeName?: string,
+    // bot-only - what this bot is ultimately working toward (see BotGoal's
+    // own comment above)
+    goal?: BotGoal,
+    // bot-only - what the bot is doing RIGHT NOW: "hunt" | "rest" |
+    // "minning" | "chopwoods". Set by the 30s goal-check interval below
+    // (spawnBot's own laziness/goal-completion check) - tracked/updated
+    // for now, doesn't drive any actual behavior change yet (a "rest"
+    // bot doesn't yet actually stop moving or show a resting animation -
+    // that's real behavioral wiring on top of this, not part of just
+    // tracking the goal/mood data itself).
+    currentMood?: string,
+    // bot-only for now - mirrors server/models/charDetM.js's own
+    // characterclass field exactly (same 4 classes, same experties/lvl
+    // shape, same sword/staff/pickaxe/axe expertise-per-class mapping) so
+    // the two never drift apart, even though a bot never actually goes
+    // through the server's REST /save route that field lives behind. A
+    // real Tplayers entry never sets this (its own characterclass lives in
+    // MongoDB, fetched separately) - undefined here, same convention hp/
+    // maxHp above already use for a bot-only field.
+    characterclass?: CharacterClass,
+}
+
+// same shape/expertise-per-class mapping as server/models/charDetM.js's own
+// characterclass field - see buildBotCharacterClass below for the one place
+// a bot's own copy actually gets built
+type CharacterClass = {
+    warbringer: { experties: string, lvl: number },
+    runecaller: { experties: string, lvl: number },
+    duskrunner: { experties: string, lvl: number },
+    soulmender: { experties: string, lvl: number },
 }
 
 // matches treasures.ts's createSwordTreasure return shape - itemDetail kept
@@ -155,7 +202,7 @@ let gates: unknown[] = []
 // spawnBot's own comment) - this array is purely server-side bookkeeping so
 // a bot's own Brain instance (and its setInterval/setTimeout timers) can be
 // found and torn down later, keyed by the same `owner` id.
-let bots: { player: Tplayers, brain: Brain }[] = []
+let bots: { player: Tplayers, brain: Brain, goalInterval: ReturnType<typeof setInterval>, wakeInterval: ReturnType<typeof setInterval> }[] = []
 let spawnBotsEnabled = false
 // client's sockets/botSensor.js's own periodic report - tcp has no idea
 // where trees/buildings/decorations are otherwise (all client-only scene
@@ -326,6 +373,38 @@ function releaseEnemiesTargeting(deadOwnerId: string){
         anyReleased = true
     })
     if(anyReleased) io.emit('registered-playerAsEnemy', tcpEnemies)
+}
+
+// mirrors applyDamageToEnemy's own shape/return convention (true = this hit
+// was the killing blow) - the one place a bot's hp actually gets reduced,
+// shared by every path that can damage a bot: a real enemy's own attack
+// ("enemyWillAttack" below, originally inlined here) and now a real
+// player's own melee swing ("playerIsHit" below, createcharacter.js's new
+// atkCollider exit trigger). Same "bot has no client of its own to apply
+// its own damage" reasoning BOT_MAX_HP's own comment already gives - the
+// server has to be authoritative for it regardless of who dealt the hit.
+function applyDamageToBot(targetId: string, dmg: number): boolean {
+    const targetBot = bots.find(b => b.player.owner === targetId)
+    if(!targetBot || targetBot.player.hp === undefined) return false
+
+    targetBot.player.hp -= dmg
+    if(targetBot.player.hp > 0) return false
+
+    targetBot.brain.destroy()
+    clearInterval(targetBot.goalInterval)
+    clearInterval(targetBot.wakeInterval)
+    const deadOwner = targetBot.player.owner
+    const deadPlaceId = targetBot.player.currentPlace.placeId
+    bots = bots.filter(b => b.player.owner !== deadOwner)
+    players = players.filter(pl => pl.owner !== deadOwner)
+    releaseEnemiesTargeting(deadOwner)
+    // same broadcast a real player's own client sends itself via "will-die"
+    // on real death (see that handler above) - NOT "removeChar" (see
+    // applyDamageToBot's own former call site's identical comment, still
+    // true here: this plays the same death-clip-then-despawn sequence a
+    // real player's own death already gets, no new client code needed)
+    io.emit('player-death', { ownerId: deadOwner, currentPlaceId: deadPlaceId })
+    return true
 }
 
 io.on("connection", (socket: Socket) => {
@@ -668,6 +747,26 @@ io.on("connection", (socket: Socket) => {
 
     //enemy related
     safeOn(socket, "enemyIsHit", data => applyDamageToEnemy(data))
+    // open PvP - createcharacter.js's own new atkCollider exit trigger
+    // (mirrors createEnemy.js's identical mechanism for world enemies) fires
+    // this the moment my own swing's hitbox clears ANOTHER player's or bot's
+    // body. dmgToApply computed the exact same weaponDmg-else-physicalDmg
+    // way applyDamageToEnemy/duelSystem.js's own local copy already do.
+    //
+    // targetId is a bot -> this server IS the authority for its hp (same
+    // reasoning applyDamageToBot's own header comment gives - a bot has no
+    // client of its own to apply anything). targetId is a REAL player ->
+    // this server tracks no hp for them at all (see "enemy-attacked"'s own
+    // comment on that convention) - the broadcast below is the only thing
+    // that ever applies this hit, read by the TARGETED player's own client
+    // (data.targetId === their own charState.owner) the same way
+    // "enemy-attacked" already works for enemy-dealt damage, just reusing
+    // this new event name instead of pretending an enemy attacked them.
+    safeOn(socket, "playerIsHit", data => {
+        const dmgToApply = data.dmgDetails.weaponDmg ? data.dmgDetails.weaponDmg : data.dmgDetails.physicalDmg
+        applyDamageToBot(data.targetId, dmgToApply)
+        io.emit("player-is-hit", { ...data, dmgToApply })
+    })
     // skill.enemyBind (see client's skillsData.js radiantjudgmentSkill and
     // skillEffects.js's hit handler) - bindChance was already rolled
     // client-side before this ever fires (this server never sees a miss,
@@ -790,30 +889,10 @@ io.on("connection", (socket: Socket) => {
         // client of its own to ever satisfy that check, so nothing was
         // ever taking this damage off anywhere. The server has to be
         // authoritative for a bot's hp instead, same reasoning BOT_MAX_HP's
-        // own comment gives.
-        const targetBot = bots.find(b => b.player.owner === data.targetId)
-        if(targetBot && targetBot.player.hp !== undefined){
-            targetBot.player.hp -= data.dmg
-            if(targetBot.player.hp <= 0){
-                targetBot.brain.destroy()
-                const deadOwner = targetBot.player.owner
-                const deadPlaceId = targetBot.player.currentPlace.placeId
-                bots = bots.filter(b => b.player.owner !== deadOwner)
-                players = players.filter(pl => pl.owner !== deadOwner)
-                releaseEnemiesTargeting(deadOwner)
-                // same broadcast a real player's own client sends itself
-                // via "will-die" on real death (see that handler above) -
-                // NOT "removeChar" (the disconnect/left-the-area cleanup
-                // path, which just instantly disposes the mesh with no
-                // animation - confirmed that's what a bot was doing before
-                // this). "player-death" is what drives worldsocket.js's own
-                // playerDied(): plays and freezes the "death" clip, THEN
-                // waits 5s before actually despawning the mesh - the exact
-                // same death sequence a real player's own death already
-                // gets, no new client code needed.
-                io.emit('player-death', { ownerId: deadOwner, currentPlaceId: deadPlaceId })
-            }
-        }
+        // own comment gives. Pulled out into applyDamageToBot (this file's
+        // own top-level function, shared with "playerIsHit" below) once a
+        // second caller needed the exact same hp/death handling.
+        applyDamageToBot(data.targetId, data.dmg)
 
         io.emit("enemy-attacked", data)
     })
@@ -1442,6 +1521,54 @@ const BOT_MAX_HP = 300
 // stronger" progression
 const BOT_LEVEL_UP_HP_BONUS = 100
 
+// BOT GOALS - see BotGoal's own type comment. Fixed per-category target +
+// fixed 3-way rotation, not randomized - matches the exact shape asked
+// for ({categ:"leveling", current:0, goal:5, afterGoalCateg:"minning"})
+// verbatim when built for "leveling", and stays simple/predictable for
+// the other two once mining/chopwood behavior actually exists to feed them.
+const BOT_GOAL_TARGETS: Record<BotGoalCateg, number> = { leveling: 5, minning: 10, chopwoods: 10 }
+const BOT_GOAL_NEXT_CATEG: Record<BotGoalCateg, BotGoalCateg> = { leveling: "minning", minning: "chopwoods", chopwoods: "leveling" }
+function buildBotGoal(categ: BotGoalCateg): BotGoal {
+    return { categ, current: 0, goal: BOT_GOAL_TARGETS[categ], afterGoalCateg: BOT_GOAL_NEXT_CATEG[categ] }
+}
+// same 4-class shape/expertise mapping server/models/charDetM.js's own
+// characterclass field defaults to (sword/staff/pickaxe/axe, one each) -
+// every bot gets all 4 entries the same way a real character does, just
+// with whichever class actually matches this bot's own combat style
+// (isMeleeStyle()'s exact isCaster threshold, npcBrain.ts) bumped to lvl 1
+// instead of sitting at the schema's own lvl:0 default. duskrunner/
+// soulmender stay at lvl 0 for every bot - neither style has an equivalent
+// yet for either of those to represent.
+function buildBotCharacterClass(isCaster: boolean): CharacterClass {
+    return {
+        warbringer: { experties: "sword", lvl: isCaster ? 0 : 1 },
+        runecaller: { experties: "staff", lvl: isCaster ? 1 : 0 },
+        duskrunner: { experties: "pickaxe", lvl: 0 },
+        soulmender: { experties: "axe", lvl: 0 },
+    }
+}
+// currentMood for whatever categ a bot's goal currently points at -
+// "leveling" reads as actively hunting (that's the only way its own
+// current progresses right now), the other two just take their own
+// categ's name directly as the mood
+function moodForGoalCateg(categ: BotGoalCateg): string {
+    return categ === "leveling" ? "hunt" : categ
+}
+// how often each bot re-checks its own laziness/goal-completion (see the
+// interval created per-bot in spawnBot() below)
+const BOT_GOAL_CHECK_INTERVAL_MS = 30000
+// how long a nap lasts before the WAKE interval ends it - same 30s asked
+// for, kept as its own named constant since it's a duration being compared
+// against elapsed time, a different thing from BOT_GOAL_CHECK_INTERVAL_MS
+// above (how often the check itself runs) even though they happen to share
+// the same value right now
+const BOT_REST_DURATION_MS = 30000
+// deliberately shorter than BOT_REST_DURATION_MS itself - checking on the
+// same 30s cadence as the nap duration would only catch "has it been
+// resting long enough" up to 30s late; a tighter check here is what keeps
+// the actual wake-up reasonably close to the real 30s mark
+const BOT_REST_WAKE_CHECK_INTERVAL_MS = 5000
+
 // @faker-js/faker instead of a small hand-written pool (was 20 fixed
 // fantasy-ish names - a hardcoded list this size guaranteed duplicates
 // once several bots were alive together, confirmed from an actual
@@ -1623,7 +1750,8 @@ function spawnBot(overrides?: { attitudeName?: string, pos?: { x: number, z: num
 
     const owner = generateUniqueBotOwner()
     const attitudeNames = Object.keys(ATTITUDE_PRESETS)
-    const attitude = ATTITUDE_PRESETS[overrides?.attitudeName ?? pickOne(attitudeNames)]
+    const attitudeName = overrides?.attitudeName ?? pickOne(attitudeNames)
+    const attitude = ATTITUDE_PRESETS[attitudeName]
     // picked ONCE per bot, same as its sword/attitude/etc below - a caster
     // bot casts the same elemental flavor its whole life, not a different
     // random spell every attack
@@ -1700,6 +1828,10 @@ function spawnBot(overrides?: { attitudeName?: string, pos?: { x: number, z: num
         IsInVulnerable: false,
         hp: BOT_MAX_HP,
         maxHp: BOT_MAX_HP,
+        attitudeName,
+        goal: buildBotGoal("leveling"),
+        currentMood: attitudeName === "lazy" ? "rest" : moodForGoalCateg("leveling"),
+        characterclass: buildBotCharacterClass(isCaster),
     }
 
     players.push(botPlayer)
@@ -1793,7 +1925,7 @@ function spawnBot(overrides?: { attitudeName?: string, pos?: { x: number, z: num
             // and this proves it; if they DO match but the client still
             // renders it facing elsewhere, the bug is purely client-side.
             const liveTarget = tcpEnemies.find(enem => enem._id === targetId)
-            log(`[botAim] ${owner} pos=(${botPlayer.pos.x.toFixed(2)},${botPlayer.pos.z.toFixed(2)}) dirTarg=(${botPlayer.dirTarg.x.toFixed(2)},${botPlayer.dirTarg.z.toFixed(2)}) target=${targetId} targetPos=(${liveTarget?.x.toFixed(2)},${liveTarget?.z.toFixed(2)})`)
+            // log(`[botAim] ${owner} pos=(${botPlayer.pos.x.toFixed(2)},${botPlayer.pos.z.toFixed(2)}) dirYaw=${(botPlayer.dirYaw ?? 0).toFixed(3)} target=${targetId} targetPos=(${liveTarget?.x.toFixed(2)},${liveTarget?.z.toFixed(2)})`)
 
             // an enemy with no target yet doesn't otherwise notice a bot at
             // all (see registerTargetIfNone's own header comment - a bot
@@ -1821,6 +1953,10 @@ function spawnBot(overrides?: { attitudeName?: string, pos?: { x: number, z: num
                     botPlayer.lvl += 1
                     botPlayer.maxHp = (botPlayer.maxHp ?? BOT_MAX_HP) + BOT_LEVEL_UP_HP_BONUS
                     botPlayer.hp = (botPlayer.hp ?? BOT_MAX_HP) + BOT_LEVEL_UP_HP_BONUS
+                    // the only real progress signal a "leveling" goal has
+                    // right now - "minning"/"chopwoods" have no equivalent
+                    // yet since bots don't actually do either of those
+                    if(botPlayer.goal?.categ === "leveling") botPlayer.goal.current += 1
                 }
             }
 
@@ -1992,7 +2128,65 @@ function spawnBot(overrides?: { attitudeName?: string, pos?: { x: number, z: num
         },
     }, botItems.some(itm => itm.itemType === "weapon" && itm.equiped))
 
-    bots.push({ player: botPlayer, brain })
+    // when this bot's CURRENT rest started (Date.now(), not a duration) -
+    // null whenever it isn't resting. Closure-scoped like lastAttackAt/etc
+    // elsewhere in this codebase rather than a Tplayers field - nothing
+    // outside this function's own two intervals below needs to read it.
+    let restStartedAt: number | null = null
+
+    // GOAL interval - every 30s, decides what to do NEXT only while NOT
+    // currently resting (a resting bot is entirely the wake-interval's own
+    // job below, this one just leaves it alone until it's active again) -
+    // checks if this bot is the lazy preset (always naps when checked, no
+    // probability roll - kept simple for this first pass) and, if not,
+    // whether its current goal is done (advance to afterGoalCateg's own
+    // fixed target if so).
+    const goalInterval = setInterval(() => {
+        if(botPlayer.currentMood === "rest") return
+
+        if(botPlayer.attitudeName === "lazy"){
+            // stops the Brain fully in place (see its own pause() comment
+            // for why nothing about the interrupted hunt/wander is kept) -
+            // Brain itself has no idea what "resting" even means, so the
+            // actual mode/visual broadcast happens here, not inside pause()
+            brain.pause()
+            botPlayer.currentMood = "rest"
+            botPlayer.mode = "resting"
+            botPlayer._moving = false
+            restStartedAt = Date.now()
+            io.emit("bot-stopped", { ownerId: owner, y: botPlayer.pos.y, dirYaw: botPlayer.dirYaw ?? 0, mode: "resting" })
+            return
+        }
+
+        if(botPlayer.goal && botPlayer.goal.current >= botPlayer.goal.goal){
+            botPlayer.goal = buildBotGoal(botPlayer.goal.afterGoalCateg)
+        }
+        if(botPlayer.goal) botPlayer.currentMood = moodForGoalCateg(botPlayer.goal.categ)
+    }, BOT_GOAL_CHECK_INTERVAL_MS)
+
+    // WAKE interval - the other half of the nap cycle: checks (on its own,
+    // shorter cadence, so the 30s threshold below is caught with decent
+    // precision instead of waiting for goalInterval's own next 30s tick)
+    // whether this bot has been resting for over BOT_REST_DURATION_MS, and
+    // if so, ends the nap and hands control back to whatever its goal
+    // actually is. A "lazy" bot's own attitudeName never changes, so
+    // goalInterval's very next 30s check will just send it right back to
+    // sleep again - the two intervals together are what actually produces
+    // a periodic "naps, wakes, potters around, naps again" cycle instead
+    // of either "always resting forever" or "never resting at all".
+    const wakeInterval = setInterval(() => {
+        if(botPlayer.currentMood !== "rest" || restStartedAt === null) return
+        if(Date.now() - restStartedAt < BOT_REST_DURATION_MS) return
+
+        restStartedAt = null
+        brain.resume()
+        // no broadcast needed here - resume() restarts Brain's own timers,
+        // and its very next think()/tickMove() tick reports a fresh mode/
+        // position through the normal onMove callback same as it always does
+        if(botPlayer.goal) botPlayer.currentMood = moodForGoalCateg(botPlayer.goal.categ)
+    }, BOT_REST_WAKE_CHECK_INTERVAL_MS)
+
+    bots.push({ player: botPlayer, brain, goalInterval, wakeInterval })
 
     // same broadcast shape join-world's own handler sends above - a bot
     // "joining" has to look identical to a real one for every connected

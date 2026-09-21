@@ -19,19 +19,25 @@ export type Attitude = {
     continuescast: number
 }
 
-// Three starting personality presets - not exhaustive, just enough
-// variety that a handful of bots spawned back to back don't all move
-// identically. "warrior" paces around like it's on patrol (fighting mode,
-// sprint pace, doesn't sit still), "caster" mostly holds position and only
-// occasionally repositions (standbycasting-heavy), "adventurer" wanders
-// the widest and most often (distancing-heavy). Same {weapon, dodging,
-// blocking, standbycasting, distancing, continuescast} shape real
-// npcFighters already use, so the exact same preset objects will still
-// make sense once attacking reads dodging/blocking/continuescast too.
+// Four starting personality presets - not exhaustive, just enough variety
+// that a handful of bots spawned back to back don't all move identically.
+// "warrior" paces around like it's on patrol (fighting mode, sprint pace,
+// doesn't sit still), "caster" mostly holds position and only occasionally
+// repositions (standbycasting-heavy), "adventurer" wanders the widest and
+// most often (distancing-heavy). Same {weapon, dodging, blocking,
+// standbycasting, distancing, continuescast} shape real npcFighters
+// already use, so the exact same preset objects will still make sense
+// once attacking reads dodging/blocking/continuescast too.
+// "lazy" - tcp/index.ts's own goal/currentMood system reads the PRESET
+// NAME a bot was given (not derived from these numbers) to decide if it's
+// the resting type - these values just keep it low-effort across the
+// board for whatever combat it does still do in between rests, not the
+// thing that actually drives the resting behavior itself.
 export const ATTITUDE_PRESETS: Record<string, Attitude> = {
     warrior:    { weapon: 1,   dodging: 0.3, blocking: 0.6, standbycasting: 0,   distancing: 0.2, continuescast: 0 },
     caster:     { weapon: 0,   dodging: 0.5, blocking: 0.2, standbycasting: 1,   distancing: 0.3, continuescast: 0.8 },
     adventurer: { weapon: 0.3, dodging: 0.4, blocking: 0.3, standbycasting: 0.2, distancing: 0.8, continuescast: 0.2 },
+    lazy:       { weapon: 0.1, dodging: 0.1, blocking: 0.1, standbycasting: 0.1, distancing: 0.1, continuescast: 0.1 },
 }
 
 // real player pacing (client/src/controllers/inputMovement.js's own
@@ -254,6 +260,14 @@ export class Brain {
     private moveTimer: ReturnType<typeof setInterval> | null = null
     private combatTimer: ReturnType<typeof setInterval> | null = null
     private lastTickAt = Date.now()
+    // tcp/index.ts's own goal/currentMood system (a "lazy" bot resting) -
+    // this class has no idea what "resting" even means (that's index.ts's
+    // own concept, driven by botPlayer.currentMood, not anything Brain
+    // tracks), it just knows how to fully stop and later pick back up
+    // exactly where a fresh bot would: no memory of the interrupted wander/
+    // hunt is kept, resume() just starts making fresh decisions again the
+    // same way the constructor's own first scheduleThink() call does.
+    private paused = false
 
     constructor(attitude: Attitude, spawnPos: { x: number, z: number }, onMove: BotMoveCallback, combat: CombatContext, hasWeapon: boolean){
         this.attitude = attitude
@@ -594,6 +608,40 @@ export class Brain {
             this.mode,
             true,
         )
+    }
+
+    // stops every timer and brings the bot to a dead stop in place -
+    // resting reads as fully disengaged, not frozen mid-swing, so any
+    // in-progress hunt is dropped too (combatTargetId cleared), not just
+    // paused-and-remembered. Idempotent - a second pause() while already
+    // paused no-ops instead of double-clearing null timers.
+    pause(){
+        if(this.paused) return
+        this.paused = true
+        if(this.decisionTimer) clearTimeout(this.decisionTimer)
+        if(this.moveTimer) clearInterval(this.moveTimer)
+        if(this.combatTimer) clearInterval(this.combatTimer)
+        this.decisionTimer = null
+        this.moveTimer = null
+        this.combatTimer = null
+        this.combatTargetId = null
+        this.moving = false
+        this.target = null
+        this.arrive.active = false
+        this.vehicle.velocity.set(0, 0, 0)
+        this.mode = "idle"
+    }
+
+    // restarts all three timers exactly as the constructor first did -
+    // no special "continue where it left off" logic, the bot just starts
+    // making fresh decisions again from wherever it's currently standing
+    resume(){
+        if(!this.paused) return
+        this.paused = false
+        this.lastTickAt = Date.now()
+        this.scheduleThink()
+        this.moveTimer = setInterval(() => this.tickMove(), MOVE_TICK_MS)
+        this.combatTimer = setInterval(() => this.checkCombat(), COMBAT_CHECK_MS)
     }
 
     destroy(){
