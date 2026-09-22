@@ -11,6 +11,7 @@ import { generateSlimes, generateFireSlimes, generateElectricSlimes, generateMon
 import { startingTreasures } from "./recources/treasures"
 import { createWagon, WAGON_HEADINGS, createHarnessDeer, Tharnessdeer, Twagon } from "./recources/wagons"
 import { Brain, ATTITUDE_PRESETS, RESTING_Y } from "./recources/npcBrain"
+import { getWeather, getWeatherState, rollWeather, setWeather, WEATHER_ROLL_INTERVAL_MS } from "./recources/weather"
 import { faker } from "@faker-js/faker"
 
 export const enemyLengthsInPlace = [
@@ -134,6 +135,16 @@ type Tplayers = {
     // MongoDB, fetched separately) - undefined here, same convention hp/
     // maxHp above already use for a bot-only field.
     characterclass?: CharacterClass,
+    // bot-only - the owner id of whichever real player recruited this bot
+    // as a servant/companion (client's own "invite to follow you" prompt,
+    // createcharacter.js's bot-interaction wiring), undefined for every
+    // bot that hasn't been recruited yet and for every real Tplayers entry.
+    // Set/cleared exclusively by the "recruit-bot"/"dismiss-bot" handlers
+    // below, which are also the only things that ever call the matching
+    // brain.setFollowOwner() - this field and the Brain's own internal
+    // followOwnerId are kept in sync by those two handlers alone, never
+    // independently.
+    servantOfOwnerId?: string,
 }
 
 // same shape/expertise-per-class mapping as server/models/charDetM.js's own
@@ -388,6 +399,12 @@ function applyDamageToBot(targetId: string, dmg: number): boolean {
     if(!targetBot || targetBot.player.hp === undefined) return false
 
     targetBot.player.hp -= dmg
+    // npcBrain.ts's own kiting behavior (caster-only, no-ops for a melee
+    // bot - see notifyDamaged's own comment) - called on every hit, lethal
+    // or not, since a bot that's about to die has no meaningful "retreat"
+    // to react to anyway and this is a no-op either way once destroy()
+    // tears the timers down right below
+    targetBot.brain.notifyDamaged()
     if(targetBot.player.hp > 0) return false
 
     targetBot.brain.destroy()
@@ -405,6 +422,24 @@ function applyDamageToBot(targetId: string, dmg: number): boolean {
     // real player's own death already gets, no new client code needed)
     io.emit('player-death', { ownerId: deadOwner, currentPlaceId: deadPlaceId })
     return true
+}
+
+// the "owner just left, release any bot(s) still serving them" half of the
+// servant relationship (see Tplayers.servantOfOwnerId's own comment) - a
+// bot whose owner disconnects would otherwise chase a spot that never
+// updates again forever (Brain's own followOwner() only ever gets a null
+// ownerPos once `players` no longer has that owner at all, which just makes
+// it hold still in place - never crashes, but never resumes normal AI
+// either without this). Called from removeCharacter() below, same
+// "someone left, clean up every reference to them" moment
+// releaseEnemiesTargeting already runs at for enemy targeting.
+function releaseServantsOf(ownerId: string){
+    bots.forEach(b => {
+        if(b.player.servantOfOwnerId !== ownerId) return
+        b.player.servantOfOwnerId = undefined
+        b.brain.setFollowOwner(null)
+        io.emit("bot-servant-updated", { botOwnerId: b.player.owner, servantOfOwnerId: null })
+    })
 }
 
 io.on("connection", (socket: Socket) => {
@@ -437,10 +472,56 @@ io.on("connection", (socket: Socket) => {
         //     callback({socketId: socket.id, placesMD});
         // }
 
+        // SERVANTS - a bot serving this owner has to move WITH them across
+        // a place change (this handler fires on every door/place transition,
+        // not just first login - see this handler's own header comment) -
+        // without this, the bot stays behind in whatever place it was just
+        // in, and every client (including the owner's own) only ever
+        // renders players/bots whose currentPlace matches ITS OWN
+        // (worldsocket.js's reCreateMeshesInScene) - looks exactly like
+        // "the bot just isn't there anymore", confirmed from an actual
+        // report. Repositioned near the owner's own freshly-reported pos,
+        // same small-random-offset convention "spawn-bot-near-me" already
+        // uses so it doesn't land literally on top of them.
+        // b.player is the SAME object reference `players` itself holds
+        // (spawnBot's own players.push(botPlayer)) - mutating it here means
+        // the userJoined broadcast just below already carries the updated
+        // currentPlace/pos, no separate emit needed for that part.
+        // brain.teleport() resets the ACTUAL simulated position this bot
+        // steers from (not just this Tplayers bookkeeping) - see that
+        // method's own comment for why that's required, not optional,
+        // the moment the place itself (an entirely different coordinate
+        // space) has changed out from under it.
+        //
+        // Known limitation, not fixed here: other players still in the
+        // OLD place get no signal that this bot just left - it lingers as
+        // a frozen "ghost" on their own screen until something else
+        // refreshes their scene. Pre-existing for ANY departing player
+        // (reCreateMeshesInScene's own would-be stale-cleanup pass is
+        // commented out, sitting on the 5s ENEMY_TARGET_VALIDATION-style
+        // sweep instead for enemies, nothing equivalent for players yet) -
+        // not a new gap this feature introduces.
+        bots.forEach(b => {
+            if(b.player.servantOfOwnerId !== data.owner) return
+            const angle = Math.random() * Math.PI * 2
+            const newX = data.pos.x + Math.cos(angle) * BOT_BESIDE_OFFSET_DIST
+            const newZ = data.pos.z + Math.sin(angle) * BOT_BESIDE_OFFSET_DIST
+            b.player.currentPlace = data.currentPlace
+            b.player.pos = { x: newX, y: RESTING_Y, z: newZ }
+            b.brain.teleport(newX, newZ)
+        })
+
         console.log(players)
+        // weather rides along in the snapshot rather than waiting for the next
+        // "weather-changed" broadcast - a player joining (or walking through
+        // any door, since this fires on every place change) would otherwise
+        // stand in clear skies until the next roll came around, while everyone
+        // already in the world was in a storm. Same reasoning this payload
+        // already carries treasures/bonfires instead of only their deltas.
         io.emit("userJoined", { currentPlaceId: data.currentPlace.placeId, newPlayerName: data.name,
             players, placesMD, tcpEnemies, quests,
-            treasures, bonfires, wagons, harnessDeer, struckWeapons
+            treasures, bonfires, wagons, harnessDeer, struckWeapons,
+            weather: getWeatherState()
         }) // always send the updated players count
     })
 
@@ -451,6 +532,18 @@ io.on("connection", (socket: Socket) => {
     // (compare emitCraftBonfire/emitRemoveTreasure above) - toggled by
     // whichever connected client presses "v", affects every bot spawned
     // from then on, not scoped to that one player.
+    // debug/admin override - forces the world onto one weather immediately
+    // instead of waiting on the roll timer, so all five states can actually be
+    // looked at without sitting through WEATHER_ROLL_INTERVAL_MS each time.
+    // Same "whichever client asks, everyone gets it" scope as
+    // toggle-spawn-bots below; there's no per-player weather to scope it to.
+    safeOn(socket, "set-weather", (data) => {
+        const applied = setWeather(data?.weather)
+        if(!applied) return log(`[weather] ignored unknown weather "${data?.weather}"`)
+        log(`[weather] forced -> ${applied}`)
+        io.emit("weather-changed", getWeatherState())
+    })
+
     safeOn(socket, "toggle-spawn-bots", () => {
         spawnBotsEnabled = !spawnBotsEnabled
         console.log(`[bots] spawning ${spawnBotsEnabled ? "ENABLED" : "disabled"}`)
@@ -470,6 +563,37 @@ io.on("connection", (socket: Socket) => {
             },
             currentPlace: data.currentPlace,
         })
+    })
+
+    // client's createcharacter.js own new bot-interaction proximity prompt
+    // ("invite to follow you") - a bot already serving someone (its own
+    // servantOfOwnerId set to a DIFFERENT owner) can't be poached by a
+    // second player just walking up and re-recruiting it; the current
+    // owner has to dismiss-bot it first. Re-inviting from the SAME owner
+    // that already has it is a harmless no-op (falls through the same
+    // guard, brain.setFollowOwner() just gets called again with the exact
+    // same id).
+    safeOn(socket, "recruit-bot", data => {
+        const { botOwnerId, ownerId } = data
+        const targetBot = bots.find(b => b.player.owner === botOwnerId)
+        if(!targetBot) return
+        if(targetBot.player.servantOfOwnerId && targetBot.player.servantOfOwnerId !== ownerId) return
+
+        targetBot.player.servantOfOwnerId = ownerId
+        targetBot.brain.setFollowOwner(ownerId)
+        io.emit("bot-servant-updated", { botOwnerId, servantOfOwnerId: ownerId })
+    })
+    // only the bot's own current servant-owner can dismiss it - not just
+    // anyone who happens to walk up to someone else's companion
+    safeOn(socket, "dismiss-bot", data => {
+        const { botOwnerId, ownerId } = data
+        const targetBot = bots.find(b => b.player.owner === botOwnerId)
+        if(!targetBot) return
+        if(targetBot.player.servantOfOwnerId !== ownerId) return
+
+        targetBot.player.servantOfOwnerId = undefined
+        targetBot.brain.setFollowOwner(null)
+        io.emit("bot-servant-updated", { botOwnerId, servantOfOwnerId: null })
     })
 
     // client's sockets/botSensor.js - see obstaclesByPlace's own comment
@@ -1865,7 +1989,29 @@ function spawnBot(overrides?: { attitudeName?: string, pos?: { x: number, z: num
         // it is (confirmed via live matching server/client console logs).
         // worldsocket.js's own "bot-moving"/"bot-stopped" apply this
         // directly via Quaternion.RotationAxis, no lookAt/position involved.
-        io.emit(moving ? "bot-moving" : "bot-stopped", { ownerId: owner, y: pos.y, dirYaw, mode })
+        //
+        // SERVANTS - x/z resync, servant-only. Combat tolerates the pure
+        // dead-reckoning this payload otherwise relies on because an enemy
+        // barely moves AND every attack (every 1.8-3.2s) already sends a
+        // one-off botTcpPos snap (the caster/melee dealDamage callbacks
+        // below) that periodically corrects any drift. Following has
+        // neither: the owner moves continuously and faster than an enemy
+        // ever does, and pure escorting throws no attack event to ever
+        // snap from - so with no correction at all, client-rendered drift
+        // from this server's own actual vehicle.position accumulates
+        // completely unchecked. Confirmed from an actual report: a
+        // followed bot looked correct for the first 10-30s, then visibly
+        // "ran off to nowhere" - it was still correctly chasing the owner
+        // server-side the whole time, just rendered from a position that
+        // had drifted far enough from reality that its own path no longer
+        // looked like "toward the owner" on screen. Riding this existing
+        // broadcast (not a new one) is enough on its own - onMove already
+        // fires roughly every MOVE_TICK_MS (120ms) while a bot is actively
+        // chasing (npcBrain.ts's own tickMove), so a servant bot gets
+        // resynced far more often than combat's own once-per-attack snap
+        // ever needed to.
+        const servantPos = botPlayer.servantOfOwnerId ? { x: pos.x, z: pos.z } : undefined
+        io.emit(moving ? "bot-moving" : "bot-stopped", { ownerId: owner, y: pos.y, dirYaw, mode, pos: servantPos })
     }, {
         // tcpEnemies' own x/z is only refreshed at specific moments (an
         // attack/skill-cast/teleport landing - see enemyWillAttack et al
@@ -2126,6 +2272,19 @@ function spawnBot(overrides?: { attitudeName?: string, pos?: { x: number, z: num
                 setTimeout(landHit, castSkillTemplate.castDuration * 1000)
             }
         },
+        // servant-following (npcBrain.ts's own setFollowOwner/followOwner) -
+        // reads the SAME live players[].pos every real player's own
+        // emitmove/emitStop handler already keeps fresh (up to ~20Hz while
+        // moving, exact on stop - see those handlers above), no new
+        // position-tracking needed. Returns null if the owner isn't even
+        // connected right now (disconnected, or - can't actually happen,
+        // but defensively covered anyway - somehow still mid-join) so
+        // Brain's own followOwner() has a clean "nothing to walk toward,
+        // just hold still" signal instead of chasing a stale/undefined spot.
+        getOwnerPos: (ownerId: string) => {
+            const ownerPlayer = players.find(pl => pl.owner === ownerId)
+            return ownerPlayer ? { x: ownerPlayer.pos.x, z: ownerPlayer.pos.z } : null
+        },
     }, botItems.some(itm => itm.itemType === "weapon" && itm.equiped))
 
     // when this bot's CURRENT rest started (Date.now(), not a duration) -
@@ -2201,6 +2360,7 @@ function spawnBot(overrides?: { attitudeName?: string, pos?: { x: number, z: num
         currentPlaceId: botPlayer.currentPlace.placeId, newPlayerName: botPlayer.name, isBot: true,
         players, placesMD, tcpEnemies, quests,
         treasures, bonfires, wagons, harnessDeer, struckWeapons,
+        weather: getWeatherState()
     })
 }
 
@@ -2208,6 +2368,17 @@ setInterval(() => {
     if (!spawnBotsEnabled) return
     spawnBot()
 }, BOT_SPAWN_INTERVAL_MS)
+
+// World weather clock. Module-level (not inside io.on("connection")) so it
+// ticks once for the whole server rather than once per connected socket -
+// same placement reasoning the bot-spawn interval above already follows.
+// Broadcast carries only the NAME; every client maps that to an ambient
+// temperature through its own constants/weather.js copy.
+setInterval(() => {
+    const rolled = rollWeather()
+    log(`[weather] rolled -> ${rolled}`)
+    io.emit("weather-changed", getWeatherState())
+}, WEATHER_ROLL_INTERVAL_MS)
 
 // pushes each live bot's own place's latest obstaclesByPlace snapshot into
 // its Brain - a bit slower than botSensor.js's own 4s report cadence, no
@@ -2428,13 +2599,14 @@ setInterval(() => {
 }, WAGON_QUOTA_CHECK_INTERVAL_MS)
 
 function removeCharacter(ownerId: string, playerName: string, placeId: number){
-    log(playerName , " disconnecting ... ")    
+    log(playerName , " disconnecting ... ")
     players = players.filter(plyr => plyr.owner !== ownerId)
     tcpEnemies.forEach(enem => {
         if(enem._targetId === ownerId){
             enem._targetId = false
         }
     })
+    releaseServantsOf(ownerId)
 
     log("total of players after disconnect " + players.length)
 

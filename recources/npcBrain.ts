@@ -142,6 +142,35 @@ const CAST_RANGE = 10
 const COMBAT_CHECK_MS = 1000
 const MELEE_COOLDOWN_MS = 1800
 const CAST_COOLDOWN_MS = 3200
+// KITING - caster-only (see notifyDamaged below): once hit, a caster spends
+// RETREAT_DURATION_MS backing straight away from its current target instead
+// of holding position and trading hits like it normally would, then falls
+// back into checkCombat's own usual close/hold logic on its own once that
+// window passes - no separate re-engage step needed, the very next tick
+// just evaluates dist-vs-range fresh like nothing happened. RETREAT_DISTANCE
+// is how far out the arrive-steering target is placed (same steering system
+// the chase-in branch already uses, just aimed the opposite direction) -
+// not a hard stop-at-exactly-this-range, just far enough to clear CAST_RANGE
+// a caster would otherwise immediately re-enter and start attacking from a
+// standstill again the very next check.
+const RETREAT_DISTANCE = 6
+const RETREAT_DURATION_MS = 2500
+// SERVANTS - how close a following bot tries to stay to its owner (close
+// enough to read as "with them", not so close it's constantly jostling for
+// the exact same spot the owner's standing on). checkCombat's own
+// moveArriveRadius reuses this directly while chasing in, same as the
+// combat branches reuse MELEE_RANGE/CAST_RANGE for the identical purpose.
+const FOLLOW_STOP_DISTANCE = 3
+// hysteresis on top of FOLLOW_STOP_DISTANCE (same reasoning renderer.js's
+// own OPENWORLD_ENEMY_SHOW_DIST/HIDE_DIST split already uses) - a single
+// shared threshold for BOTH "start chasing" and "stop chasing" flickers
+// between the two every single checkCombat tick whenever dist happens to
+// settle right at that exact boundary (yuka's own arrive steering doesn't
+// stop EXACTLY on the radius, it decelerates to somewhere close to it) -
+// confirmed from an actual report ("faces me, then just starts running").
+// Deliberately bigger than FOLLOW_STOP_DISTANCE so there's real separation
+// between the two triggers, not just a hairline gap.
+const FOLLOW_RESUME_DISTANCE = 5
 // flat damage numbers, not a real weapon/magic stat formula - bots have no
 // equipped gear yet (spawnBot's own items:[]), so there's no real
 // calcDmg-style input to derive this from. Cast hits harder to compensate
@@ -162,6 +191,12 @@ const CAST_DMG = 32
 // falling back to the enemy's own x/z if not.
 export type EnemyLike = { _id: string, x: number, z: number, hp: number, approachX?: number, approachZ?: number }
 export type DealDamageCallback = (targetId: string, dmgDetails: { physicalDmg: number, weaponDmg: number }) => void
+// SERVANTS - index.ts's own recruit-bot/dismiss-bot handlers call
+// setFollowOwner() below, which is the only thing that ever reads this.
+// Reuses whatever live position that owner's OWN emitmove/emitStop
+// handlers already keep fresh in `players` - null if that owner isn't
+// even connected right now (see followOwner()'s own null-handling)
+export type GetOwnerPos = (ownerId: string) => { x: number, z: number } | null
 // closest enemy ANYWHERE in the bot's own place, no distance cap at all -
 // null if that place currently has none. The single source of truth for
 // both target ACQUISITION (checkCombat locks onto whatever this returns
@@ -171,6 +206,7 @@ export type GetNearestEnemy = (x: number, z: number) => EnemyLike | null
 export type CombatContext = {
     getNearestEnemy: GetNearestEnemy
     dealDamage: DealDamageCallback
+    getOwnerPos: GetOwnerPos
 }
 
 const clamp01 = (n: number) => Math.max(0, Math.min(1, n))
@@ -256,6 +292,21 @@ export class Brain {
     private hasWeapon: boolean
     private combatTargetId: string | null = null
     private lastAttackAt = 0
+    // set by notifyDamaged() below, read by checkCombat() - a timestamp
+    // rather than a plain boolean so checkCombat can just compare against
+    // Date.now() each tick with no separate timer/timeout of its own to
+    // manage or clean up
+    private retreatUntil = 0
+    // set by setFollowOwner() below, read by checkCombat() (which checks
+    // this FIRST, ahead of everything else) and think() (which skips
+    // rolling a fresh wander/hold decision entirely while this is set,
+    // same reasoning it already skips one while combatTargetId is set)
+    private followOwnerId: string | null = null
+    // hysteresis state for followOwner() below (FOLLOW_STOP_DISTANCE/
+    // FOLLOW_RESUME_DISTANCE's own comment has the full "why") - which of
+    // the two thresholds actually applies next depends on which side of
+    // the gap this bot was already on, not just its current raw distance
+    private followingOwner = false
     private decisionTimer: ReturnType<typeof setTimeout> | null = null
     private moveTimer: ReturnType<typeof setInterval> | null = null
     private combatTimer: ReturnType<typeof setInterval> | null = null
@@ -336,6 +387,17 @@ export class Brain {
     // currently closest) until the place has none left at all.
     private checkCombat(){
         const p = this.vehicle.position
+
+        // SERVANTS - takes over movement/target entirely while serving an
+        // owner, ahead of even LOOKING for an enemy - a recruited bot is a
+        // companion first, not expected to wander off mid-escort to go
+        // pick a fight (see followOwner()'s own comment for the full
+        // "why exclusively this, nothing else" reasoning)
+        if(this.followOwnerId){
+            this.followOwner(p)
+            return
+        }
+
         const target = this.combat.getNearestEnemy(p.x, p.z)
 
         if(!target){
@@ -364,6 +426,32 @@ export class Brain {
         const dz = target.z - p.z
         const dist = Math.hypot(dx, dz)
         const range = this.isMeleeStyle() ? MELEE_RANGE : CAST_RANGE
+
+        // KITING - notifyDamaged() set this on a recent hit (caster-only,
+        // see its own comment) - takes priority over both the chase-in and
+        // hold-and-attack branches below for RETREAT_DURATION_MS, same
+        // arrive-steering fields the chase-in branch uses just aimed
+        // straight away from the target instead of toward it. Falls
+        // through to the normal dist-vs-range logic on its own the instant
+        // Date.now() clears retreatUntil - no explicit "re-engage" step,
+        // the very next tick just evaluates fresh like nothing happened.
+        if(Date.now() < this.retreatUntil){
+            // dist > 0.01 guard mirrors this function's own facing
+            // fallback further down - an attacker standing exactly on top
+            // of this bot has no real direction to flee FROM, so this
+            // just picks a fixed arbitrary heading instead of dividing by
+            // zero into a NaN target
+            const awayX = p.x + (dist > 0.01 ? -dx / dist : 0) * RETREAT_DISTANCE
+            const awayZ = p.z + (dist > 0.01 ? -dz / dist : 1) * RETREAT_DISTANCE
+            this.mode = "fighting"
+            this.target = { x: awayX, z: awayZ }
+            this.moveArriveRadius = ARRIVE_RADIUS
+            this.arrive.target.set(awayX, 0, awayZ)
+            this.arrive.active = true
+            this.vehicle.maxSpeed = SPRINT_SPEED
+            this.moving = true
+            return
+        }
 
         if(dist > range){
             // close the distance - re-aims the SAME arrive steering
@@ -448,6 +536,116 @@ export class Brain {
         this.combat.dealDamage(target._id, { physicalDmg: dmg, weaponDmg: 0 })
     }
 
+    // SERVANTS - checkCombat's own followOwnerId branch delegates here
+    // instead of ever reaching getNearestEnemy()/the hunting logic at all.
+    // Deliberately exclusive, not "follow AND still fight anything nearby" -
+    // a v1 escort-only companion, same scope as what was actually asked
+    // for ("the bot can follow me"); layering in "also fights for you while
+    // following" is a real separate feature on top of this, not something
+    // this pass tries to guess at.
+    private followOwner(p: YukaVector3){
+        const ownerPos = this.combat.getOwnerPos(this.followOwnerId!)
+        if(!ownerPos){
+            // owner disconnected (or never actually connected - shouldn't
+            // happen, but this is the same safe fallback either way) -
+            // nothing to walk toward, just hold still exactly like
+            // checkCombat's own "hunt just ended" branch does rather than
+            // leaving stale arrive/velocity state active
+            if(this.moving){
+                this.moving = false
+                this.arrive.active = false
+                this.vehicle.velocity.set(0, 0, 0)
+                this.mode = "idle"
+                this.onMove({ x: p.x, y: RESTING_Y, z: p.z }, 0, this.mode, false)
+            }
+            return
+        }
+
+        const dx = ownerPos.x - p.x
+        const dz = ownerPos.z - p.z
+        const dist = Math.hypot(dx, dz)
+
+        // hysteresis - see FOLLOW_RESUME_DISTANCE's own comment. Only
+        // flips state at the FAR edge (resume chasing) or the NEAR edge
+        // (stop chasing) - anywhere in between just continues whatever it
+        // was already doing, instead of a single boundary both edges share
+        if(this.followingOwner){
+            if(dist <= FOLLOW_STOP_DISTANCE) this.followingOwner = false
+        } else {
+            if(dist > FOLLOW_RESUME_DISTANCE) this.followingOwner = true
+        }
+
+        if(this.followingOwner){
+            // same arrive-steering shape checkCombat's own chase-in branch
+            // uses, just aimed at the owner instead of an enemy - mode
+            // "fighting" (not "casting"/"idle") purely because that's what
+            // renderer.js's own bot-stepping reads to pick BOT_SPRINT_SPEED,
+            // same reasoning that branch's own comment gives, nothing to do
+            // with this bot's actual combat style
+            this.mode = "fighting"
+            this.target = { x: ownerPos.x, z: ownerPos.z }
+            this.moveArriveRadius = FOLLOW_STOP_DISTANCE
+            this.arrive.target.set(ownerPos.x, 0, ownerPos.z)
+            this.arrive.active = true
+            this.vehicle.maxSpeed = SPRINT_SPEED
+            this.moving = true
+            return
+        }
+
+        // close enough - hold position, but keep FACING the owner's own
+        // live position every tick, same "why" checkCombat's own in-range
+        // branch gives for doing the exact same thing toward an enemy
+        this.mode = "idle"
+        this.moving = false
+        this.arrive.active = false
+        this.vehicle.velocity.set(0, 0, 0)
+
+        const facing = dist > 0.01 ? { x: dx / dist, z: dz / dist } : { x: 0, z: 1 }
+        const dirYaw = Math.atan2(facing.x, facing.z)
+        this.onMove({ x: p.x, y: RESTING_Y, z: p.z }, dirYaw, this.mode, false)
+    }
+
+    // index.ts's own recruit-bot/dismiss-bot handlers - the ONLY callers,
+    // and the only thing that ever mutates followOwnerId. null dismisses:
+    // checkCombat's own followOwnerId check just goes false on the very
+    // next tick and the bot falls straight back into normal
+    // hunting/wandering with no extra reset needed here (same "just flip a
+    // flag, let the existing loop read it" shape pause()/resume() already
+    // use for resting).
+    setFollowOwner(ownerId: string | null){
+        this.followOwnerId = ownerId
+        // fresh start every time (a new recruit, a re-recruit, or a
+        // dismiss) - followOwner()'s own hysteresis has nothing meaningful
+        // to remember across a boundary like this, so there's no reason to
+        // carry a stale true/false over from whatever it was serving before
+        this.followingOwner = false
+    }
+
+    // SERVANTS - index.ts's own "join-world" handler calls this the
+    // instant it detects a place change for an owner who has a servant,
+    // right before it repositions botPlayer.pos/currentPlace to match. A
+    // place change means an entirely different coordinate space - without
+    // this, the bot would keep steering toward wherever the owner "was" in
+    // the OLD place's coordinates, a meaningless direction once it's
+    // actually dropped into the new one. Resets THIS class's own real
+    // simulated position (vehicle.position), not just whatever gets
+    // broadcast to clients - same reasoning followOwner()'s own header
+    // comment gives for why position (unlike facing) has to be handled
+    // carefully: Brain is the actual gameplay authority here, a stale
+    // internal position would send it chasing nowhere real regardless of
+    // what index.ts tells clients to render. homeAnchor moves too - the
+    // true wander-leash center a dismissed servant would fall back to
+    // means nothing once it's not even in that old place anymore.
+    teleport(x: number, z: number){
+        this.vehicle.position.set(x, 0, z)
+        this.homeAnchor = { x, z }
+        this.target = null
+        this.moving = false
+        this.arrive.active = false
+        this.vehicle.velocity.set(0, 0, 0)
+        this.followingOwner = false
+    }
+
     // a small utility-AI pass: score every candidate action 0-1 against
     // this bot's own attitude weights plus a little jitter, then act on
     // whichever scores highest. Only two real candidates exist in this
@@ -459,6 +657,15 @@ export class Brain {
         // owns movement/target entirely while engaged - re-rolling a wander
         // decision mid-fight would fight it for control of `target`/`arrive`
         if(this.combatTargetId){
+            this.scheduleThink()
+            return
+        }
+
+        // SERVANTS - same reasoning as combatTargetId right above: checkCombat
+        // (which checks followOwnerId FIRST, ahead of any hunting) already
+        // owns movement/target entirely while serving someone, a wander
+        // decision here would fight it for control the same way
+        if(this.followOwnerId){
             this.scheduleThink()
             return
         }
@@ -576,10 +783,20 @@ export class Brain {
         const dx = this.target.x - this.vehicle.position.x
         const dz = this.target.z - this.vehicle.position.z
         if(Math.hypot(dx, dz) < this.moveArriveRadius){
-            if(this.combatTargetId){
-                // just halt, stay in "fighting" mode/facing - checkCombat's
-                // own independent COMBAT_CHECK_MS loop is what actually
-                // decides to swing/cast from here, not this arrival check
+            if(this.combatTargetId || this.followOwnerId){
+                // just halt, stay facing wherever it currently is -
+                // checkCombat's own independent COMBAT_CHECK_MS loop (up to
+                // 1s away, not this 120ms arrival check) is what actually
+                // decides what happens next: swing/cast for a combat
+                // target, or re-face the owner for a following bot.
+                // followOwnerId used to fall through to the stop() branch
+                // below instead (it's not a combatTargetId) - stop() resets
+                // dirYaw to an arbitrary "face world +Z" placeholder, so a
+                // bot arriving next to its owner would instantly snap to
+                // face some unrelated direction instead of the owner, for
+                // however long it took checkCombat's own next tick (up to
+                // 1s) to correct it - looked exactly like "invited it and
+                // it immediately turned and ran off".
                 this.moving = false
                 this.arrive.active = false
                 this.vehicle.velocity.set(0, 0, 0)
@@ -608,6 +825,23 @@ export class Brain {
             this.mode,
             true,
         )
+    }
+
+    // called from index.ts's applyDamageToBot the instant a hit actually
+    // lands on this bot - any source (a real world enemy, a real player's
+    // own melee swing, another bot). Caster-only: a melee-style bot WANTS
+    // to be in someone's face, so retreating the moment it takes a hit
+    // would fight its own combat style - checkCombat's own isMeleeStyle()
+    // check already decides fighting vs casting everywhere else, matched
+    // here as well rather than inventing a second flag for the same split.
+    // Just sets a timestamp - doesn't touch combatTargetId/mode/movement
+    // itself, checkCombat's own next tick (COMBAT_CHECK_MS, already
+    // running regardless of this) is what actually reads it and reacts,
+    // same "flip a flag, let the existing loop read it" shape pause()
+    // below already uses for resting.
+    notifyDamaged(){
+        if(this.isMeleeStyle()) return
+        this.retreatUntil = Date.now() + RETREAT_DURATION_MS
     }
 
     // stops every timer and brings the bot to a dead stop in place -
