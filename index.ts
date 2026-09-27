@@ -9,8 +9,8 @@ import enemyArray, { OPENWORLD_SLIME_TERRITORY, OPENWORLD_ENEMY_BANDS } from "./
 import startingQuests, { createSlaySlimesQuest, F_RANK_QUEST_COUNT } from "./recources/quests"
 import { generateSlimes, generateFireSlimes, generateElectricSlimes, generateMonoliths, generateDarkSlimes, generateLesserDemons } from "./generate-datas/genenemy"
 import { startingTreasures } from "./recources/treasures"
-import { createWagon, WAGON_HEADINGS, createHarnessDeer, Tharnessdeer, Twagon } from "./recources/wagons"
 import { Brain, ATTITUDE_PRESETS, RESTING_Y } from "./recources/npcBrain"
+import { rollBotLevelReward, botTypeFor, botDamageAfterArmor } from "./recources/botItems"
 import { getWeather, getWeatherState, rollWeather, setWeather, WEATHER_ROLL_INTERVAL_MS } from "./recources/weather"
 import { faker } from "@faker-js/faker"
 
@@ -101,6 +101,11 @@ type Tplayers = {
     // real player is. Undefined for every real Tplayers entry.
     hp?: number,
     maxHp?: number,
+    // bot-only progression. A bot has no client of its own to hold these
+    // (same reasoning hp/maxHp above are bot-only), so tcp is authoritative:
+    // every kill adds 1 exp, and reaching maxExp levels the bot up.
+    exp?: number,
+    maxExp?: number,
     // bot-only, ongoing facing (radians, Y-axis only) - see
     // BotMoveCallback's own header comment (recources/npcBrain.ts) for why
     // this is a plain angle and not a dirTarg point. dirTarg above stays a
@@ -228,16 +233,6 @@ let quests = startingQuests
 let treasures: Ttreasure[] = startingTreasures
 let bonfires: Tbonfire[] = []
 let struckWeapons: Tstruckweapon[] = []
-// wagons is now the FOLLOWER array (recources/wagons.ts's own header
-// comment on the flip) - each entry only references which harness deer
-// pulls it via deerId, no movement law of its own. Never removed once
-// placed (same permanence as bonfires above). Starts EMPTY, not
-// pre-populated - the staggered startup sequence below fills this in one
-// heading at a time instead of all 4 appearing the instant the server boots.
-let wagons: Twagon[] = []
-// harness deer - the primary/driving entity of the pairing now, one per
-// wagon. Same permanence as wagons above. Also starts EMPTY, same reasoning.
-let harnessDeer: Tharnessdeer[] = []
 
 // enemy._id -> a per-bind counter, only used by the enemyBind handler below
 // (skill.enemyBind) - lets a second bind landing on an already-bound enemy
@@ -282,6 +277,29 @@ function safeOn(socket: Socket, event: string, handler: (...args: any[]) => void
     })
 }
 
+// The ONE line this server prints about enemy combat.
+//
+// It used to log every single hit's remaining hp ("enemy hp 2062 / 2500").
+// With several bots fighting at once that scrolls continuously and buries
+// everything else in the terminal, while telling you nothing you cannot
+// already see in game - an enemy's health bar counting down is the client's
+// job. A KILL is the event actually worth a line, so only that gets one.
+//
+// The killer is looked up in `players`, which holds bots and real players
+// alike (spawnBot pushes its botPlayer straight into it), so a single lookup
+// covers both cases. `bots` is consulted only to label which kind it was,
+// since Tplayers carries no isBot flag of its own.
+function logEnemyKill(enemyTarg: any, killerId: string){
+    const enemyName = enemyTarg?.dn ?? enemyTarg?.name ?? "enemy"
+    const killer = players.find(pl => pl.owner === killerId)
+    // no killer resolves when the hit came from a player who disconnected
+    // mid-swing, or a bot that died to something else on the same tick -
+    // still worth a line, just without a name to put on it
+    if(!killer) return log(`[kill] ${enemyName} killed by <unknown ${killerId ?? "?"}>`)
+    const kind = bots.some(b => b.player.owner === killerId) ? "bot" : "player"
+    log(`[kill] ${enemyName} killed by ${killer.name} lvl ${killer.lvl} (${kind})`)
+}
+
 // the ONE place enemy hp actually gets mutated - originally inline inside
 // the "enemyIsHit" socket handler below, pulled out so recources/npcBrain.ts's
 // own bot combat (BOT PLAYERS block further down) can deal REAL damage
@@ -322,8 +340,10 @@ function applyDamageToEnemy(data: any): boolean {
     const dmgToApply = dmgDetails.weaponDmg ? dmgDetails.weaponDmg : dmgDetails.physicalDmg
     enemyTarg.hp -= dmgToApply
     const isLethal = enemyTarg.hp <= 0
-    if(isLethal) tcpEnemies = tcpEnemies.filter(enemy => enemy._id !== targetId)
-    console.log(`enemy hp ${enemyTarg.hp} / ${enemyTarg.maxHp}`)
+    if(isLethal){
+        tcpEnemies = tcpEnemies.filter(enemy => enemy._id !== targetId)
+        logEnemyKill(enemyTarg, data.playerId)
+    }
     // {...data, ...} is what carries a hit weapon's own effectsWhenHit
     // (client's characterstate.js dealDamageToEnemy, e.g. the Majestic
     // Sword's burn - npcDetails.js item data) all the way back to every
@@ -374,6 +394,26 @@ function registerTargetIfNone(enemyId: string, targetId: string, dirTarg: any) {
 // via "registered-playerAsEnemy" reuses the exact relay target ACQUISITION
 // already goes through - every client already has a handler for it, no new
 // event needed.
+// SERVANTS - "whatever my owner is fighting is what I fight". Called from
+// the "enemyIsHit" handler below, which every real player attack on an
+// enemy reaches (melee swings AND skill hits), so simply attacking
+// something is how you command your companions - there is no separate order
+// to issue, which is the whole point of the design.
+//
+// Broadcasts nothing: a servant switching target has no client-visible
+// effect of its own beyond the movement/attacks it is already emitting
+// through its normal Brain loop, so there is nothing extra for anyone to
+// render. Silently does nothing for a player with no servants, which is the
+// overwhelmingly common case and why the early return is worth having on a
+// path this hot (it runs on every single hit anyone lands).
+function commandServantsToAttack(ownerId: string, enemyId: string){
+    if(!ownerId || !enemyId) return
+    bots.forEach(b => {
+        if(b.player.servantOfOwnerId !== ownerId) return
+        b.brain.commandAttack(enemyId)
+    })
+}
+
 function releaseEnemiesTargeting(deadOwnerId: string){
     let anyReleased = false
     tcpEnemies.forEach(enem => {
@@ -384,6 +424,24 @@ function releaseEnemiesTargeting(deadOwnerId: string){
         anyReleased = true
     })
     if(anyReleased) io.emit('registered-playerAsEnemy', tcpEnemies)
+}
+
+// Physical damage after the target's worn armour, for any target id.
+//
+// Returns `dmg` untouched when the id is not a bot, which is what makes it
+// safe to run on EVERY hit at both call sites below: a real player's hp is
+// tracked entirely client-side (see "enemy-attacked"'s own comment), so
+// their armour is their own client's business and this must not touch it.
+//
+// Callers apply this BEFORE both the hp deduction and the broadcast, so the
+// number that goes out on the wire is the number that actually landed -
+// worldsocket.js's "player-is-hit" handler reads it to decide between the
+// blood spray and the weapon-block clang, and a bot in heavy plate shrugging
+// off a hit should sound like it.
+function mitigatedBotDamage(targetId: string, dmg: number): number {
+    const targetBot = bots.find(b => b.player.owner === targetId)
+    if(!targetBot) return dmg
+    return botDamageAfterArmor(targetBot.player.items, dmg)
 }
 
 // mirrors applyDamageToEnemy's own shape/return convention (true = this hit
@@ -520,7 +578,7 @@ io.on("connection", (socket: Socket) => {
         // already carries treasures/bonfires instead of only their deltas.
         io.emit("userJoined", { currentPlaceId: data.currentPlace.placeId, newPlayerName: data.name,
             players, placesMD, tcpEnemies, quests,
-            treasures, bonfires, wagons, harnessDeer, struckWeapons,
+            treasures, bonfires, struckWeapons,
             weather: getWeatherState()
         }) // always send the updated players count
     })
@@ -870,7 +928,15 @@ io.on("connection", (socket: Socket) => {
     })
 
     //enemy related
-    safeOn(socket, "enemyIsHit", data => applyDamageToEnemy(data))
+    // SERVANTS - a real player landing a hit on an enemy is also the ORDER
+    // that sends their servants at it. There is no separate "attack that"
+    // button by design: whatever you are fighting is what your companions
+    // fight (npcBrain.ts's own commandAttack). This fires for melee swings
+    // and skill hits alike, since every one of them reaches this handler.
+    safeOn(socket, "enemyIsHit", data => {
+        applyDamageToEnemy(data)
+        commandServantsToAttack(data.playerId, data.targetId)
+    })
     // open PvP - createcharacter.js's own new atkCollider exit trigger
     // (mirrors createEnemy.js's identical mechanism for world enemies) fires
     // this the moment my own swing's hitbox clears ANOTHER player's or bot's
@@ -887,8 +953,19 @@ io.on("connection", (socket: Socket) => {
     // "enemy-attacked" already works for enemy-dealt damage, just reusing
     // this new event name instead of pretending an enemy attacked them.
     safeOn(socket, "playerIsHit", data => {
-        const dmgToApply = data.dmgDetails.weaponDmg ? data.dmgDetails.weaponDmg : data.dmgDetails.physicalDmg
+        const rawDmg = data.dmgDetails.weaponDmg ? data.dmgDetails.weaponDmg : data.dmgDetails.physicalDmg
+        // a bot target soaks this through whatever armour it has earned;
+        // a real player target gets it back unchanged (see mitigatedBotDamage)
+        const dmgToApply = mitigatedBotDamage(data.targetId, rawDmg)
         applyDamageToBot(data.targetId, dmgToApply)
+        // RETALIATION - a bot that just got hit fights back, hired or not.
+        // data.playerId is whoever swung: createcharacter.js's atkCollider
+        // exit trigger sends its own charState.owner, so the attacker is
+        // already known here with nothing new to plumb through. No-ops when
+        // the target is a real player (nothing to notify) and, deliberately,
+        // when a servant's own owner is the one who clipped it - see
+        // notifyAttackedBy's own comment on why that guard has to exist.
+        bots.find(b => b.player.owner === data.targetId)?.brain.notifyAttackedBy(data.playerId)
         io.emit("player-is-hit", { ...data, dmgToApply })
     })
     // skill.enemyBind (see client's skillsData.js radiantjudgmentSkill and
@@ -1016,9 +1093,16 @@ io.on("connection", (socket: Socket) => {
         // own comment gives. Pulled out into applyDamageToBot (this file's
         // own top-level function, shared with "playerIsHit" below) once a
         // second caller needed the exact same hp/death handling.
-        applyDamageToBot(data.targetId, data.dmg)
+        // a bot target soaks this through whatever armour it has earned; a
+        // real player target gets it back unchanged (see mitigatedBotDamage),
+        // which is what makes it safe to fold into the broadcast too - and
+        // worth folding in, because the client's own "enemy-attacked" handler
+        // reads dmg to pick blood vs the shrugged-off clang, and that comment
+        // already calls that threshold "armor/toughness".
+        const dmgAfterArmor = mitigatedBotDamage(data.targetId, data.dmg)
+        applyDamageToBot(data.targetId, dmgAfterArmor)
 
-        io.emit("enemy-attacked", data)
+        io.emit("enemy-attacked", { ...data, dmg: dmgAfterArmor })
     })
     // coarse, throttled ping from a client's own chase loop (renderer.js,
     // emitEnemyChasePosition's own header comment) - chase movement itself
@@ -1357,43 +1441,11 @@ const BOT_SWORDS = [
 // a staff reads as an actual caster's weapon, unlike a sword a caster-leaning
 // bot would otherwise be shown carrying but never really swinging.
 const BOT_STAFF = { name: "wanderersstaff", dn: "Wanderer's Staff", parts: { handleColor: "wood" } }
-// real helmet/hat entries, hand-copied from client/src/charactersystem/
-// inventory.js's own "give all items" catalog (npcDetails.js also
-// independently uses ironjaw/orionhelm/farmhat on real NPCs, confirming
-// these actually render). No item literally called "witch hat" exists
-// anywhere in the game's data - "lauriethat" (modelName "magicianhat", dn
-// "Lauriet's Hat") is the closest real thing to it, a proper pointed
-// wizard-style hat, kept as its own separate constant below so caster
-// bots can specifically be biased toward it instead of the general pool.
-const BOT_HELMETS = [
-    { name: "ironjaw", modelName: "ironjaw", dn: "Knight's Helm III" },
-    { name: "orionhelm", modelName: "orionhelm", dn: "Orion Helm" },
-    { name: "farmhat", modelName: "farmhat", dn: "Farmer's Hat" },
-    { name: "ironmask", modelName: "ironmask", dn: "Iron Mask", hairVisible: true },
-]
-const BOT_WITCH_HAT = { name: "lauriethat", modelName: "magicianhat", dn: "Lauriet's Hat" }
-// how often a CASTER bot specifically gets BOT_WITCH_HAT instead of a
-// plain roll off the general BOT_HELMETS pool above - "some of them", not
-// all, per spec. Melee bots never roll this at all (see buildBotItems),
-// keeping it a caster-only flavor.
-const BOT_WITCH_HAT_CHANCE = 0.5
-// tools/metalmat.js's own METAL_TINTS keys (tcp can't import that file
-// directly - separate node project, same reasoning BOT_SWORDS' own comment
-// gives) - every one of these actually resolves to a real tinted material,
-// not invented placeholder names.
-const BOT_METAL_COLORS = ["iron", "steel", "bronze", "silver", "gold", "mythril", "adamantine", "ruby", "dragonscale"]
-// real armor/pauldron entries, same "give all items" catalog BOT_HELMETS'
-// own comment sources from. Unlike helmets, createcharacter.js's own
-// equipArmor(itm.name, itm.metalColor)/equipPauldron(itm.name,
-// itm.metalColor) key off `name` directly - no separate modelName field
-// needed for either. Only one real pauldron model exists in the game's
-// data at all ("ironpaul"), so that one isn't a pool - just always that
-// name with a random metal color, same as armor/helmet get.
-const BOT_ARMORS = [
-    { name: "knightscale", dn: "Knight's Scale" },
-    { name: "lightarmor", dn: "Light Armor" },
-]
-const BOT_PAULDRON_NAME = "ironpaul"
+// Bot armour/helmet/pauldron pools used to live here. They moved to
+// recources/botItems.ts when bots stopped spawning pre-equipped: that file
+// is now the single catalogue, split by archetype, and is the only thing
+// that hands gear out (as level-up rewards). Only the WEAPON pools above
+// stay here, because a weapon is still granted at spawn.
 // {r,g,b} 0-1 floats, same shape/range client/src/constants/adventurerColors.js's
 // own ADVENTURER_COLORS palette already uses (a small hand-picked subset of
 // it, not imported directly - tcp is a separate node project from client,
@@ -1640,10 +1692,21 @@ const BOT_CASTER_STATS = { weapon: 1, accuracy: 1, critical: 1, dex: 1, strength
 // a real fight without this being a throwaway one-hit), not meant to survive
 // a real player-scale beating
 const BOT_MAX_HP = 300
-// per kill, flat - no real per-enemy exp curve to feed off (bots don't
-// track expToGain anywhere), just a simple, visible "it's getting
-// stronger" progression
-const BOT_LEVEL_UP_HP_BONUS = 100
+// BOT PROGRESSION
+// A kill no longer levels a bot outright - it grants 1 exp, and the bot
+// levels when exp reaches maxExp. Each level then makes the NEXT one dearer,
+// so a bot climbs quickly at first and then slows, instead of gaining a level
+// per kill forever.
+//
+//   kill            -> exp += 1
+//   exp >= maxExp   -> lvl += 1, hp/maxHp += 50, maxExp += 10, exp resets
+//   lvl % 5 === 0   -> one random equipable from recources/botItems.ts
+const BOT_LEVEL_UP_HP_BONUS = 50
+const BOT_EXP_PER_KILL = 1
+const BOT_STARTING_MAX_EXP = 5
+const BOT_MAX_EXP_GROWTH = 10
+// every Nth level grants gear. 5 per spec - levels 5, 10, 15, 20...
+const BOT_REWARD_LEVEL_INTERVAL = 5
 
 // BOT GOALS - see BotGoal's own type comment. Fixed per-category target +
 // fixed 3-way rotation, not randomized - matches the exact shape asked
@@ -1732,30 +1795,20 @@ function generateUniqueBotOwner(): string {
     while(players.some(pl => pl.owner === owner)) owner = `bot_${randNumString()}`
     return owner
 }
-
-// a real, equipped weapon + boots + helmet - same full item shape a real
-// swordsData.js/npcDetails.js item already uses (createCharacter's own
-// equip dispatch needs every one of these fields, not just name/itemType).
+// A bot now spawns with its WEAPON ONLY - no boots, helmet, armor or
+// pauldron. Everything else is earned: recources/botItems.ts is the reward
+// pool, handed out one piece at a time every BOT_REWARD_LEVEL_INTERVAL
+// levels (see the level-up block in spawnBot own dealDamage callback).
+//
+// The weapon stays because it is the bot identity rather than loot - it
+// decides whether the thing reads as a swordsman or a spellcaster, and the
+// combat code assumes everyone is armed (hasWeapon feeds the attack style).
 // isCaster picks a wanderersstaff instead of a random sword - a caster
 // visibly carrying a sword it never really swings looked wrong once bots
-// actually started casting real skills; a staff reads as an actual
-// caster's weapon instead. Everyone still gets a real weapon regardless
-// (nothing goes empty-handed).
+// actually started casting real skills.
 function buildBotItems(isCaster: boolean): any[] {
     const weaponType = isCaster ? "staff" : "sword"
     const weapon = isCaster ? BOT_STAFF : pickOne(BOT_SWORDS)
-    // "some of them" per spec, not every caster - melee bots never roll
-    // this at all, keeping the witch/magician hat a caster-only flavor
-    const helmet = (isCaster && Math.random() < BOT_WITCH_HAT_CHANCE) ? BOT_WITCH_HAT : pickOne(BOT_HELMETS)
-    const helmetMetalColor = pickOne(BOT_METAL_COLORS)
-    // armor/pauldron - close-combat bots only, per spec (a caster reads as
-    // a robed spellcaster with just a staff + hat, not someone in plate).
-    // Each rolls its OWN independent metal color, same as the helmet does -
-    // a bot's armor and pauldron don't have to match each other or the
-    // helmet, real players mix-and-match sets too.
-    const armor = !isCaster ? pickOne(BOT_ARMORS) : null
-    const armorMetalColor = pickOne(BOT_METAL_COLORS)
-    const pauldronMetalColor = pickOne(BOT_METAL_COLORS)
     return [
         {
             itemId: `bot-item-${randNumString()}`,
@@ -1777,90 +1830,107 @@ function buildBotItems(isCaster: boolean): any[] {
             rarity: "common",
             parts: weapon.parts,
         },
-        {
-            itemId: `bot-item-${randNumString()}`,
-            name: "leatherboots",
-            dn: "Leather Boots",
-            itemCateg: "equipable",
-            itemType: "boots",
-            equipAbilities: { dmg: 0, def: 0, resistance: 5, magicDmg: 0, plusStr: 0, plusDex: 0, plusInt: 0 },
-            consumeAbilities: { plusHp: 0, plusMp: 0, plusSp: 0, plusDmg: 0, plusSpd: 0 },
-            equiped: true,
-            soulFeed: 0,
-            isEnhanceAble: false,
-            enhancedLevel: 0,
-            durability: { current: 100, max: 100 },
-            price: { coinType: "bronze", pieces: 9 },
-            qnty: 1,
-            rarity: "common",
-        },
-        {
-            itemId: `bot-item-${randNumString()}`,
-            name: helmet.name,
-            modelName: helmet.modelName,
-            dn: helmet.dn,
-            itemCateg: "equipable",
-            itemType: "helmet",
-            weaponType: undefined,
-            equipAbilities: { dmg: 0, def: 20, resistance: 10, magicDmg: 0, plusStr: 0, plusDex: 0, plusInt: 0 },
-            consumeAbilities: { plusHp: 0, plusMp: 0, plusSp: 0, plusDmg: 0, plusSpd: 1 },
-            equiped: true,
-            soulFeed: 0,
-            isEnhanceAble: true,
-            enhancedLevel: 0,
-            slots: [],
-            durability: { current: 100, max: 100 },
-            price: { coinType: "bronze", pieces: 20 },
-            qnty: 1,
-            rarity: "rare",
-            metalColor: helmetMetalColor,
-            hairVisible: (helmet as { hairVisible?: boolean }).hairVisible,
-        },
-        // armor/pauldron - melee only (armor is null for a caster) -
-        // spread out rather than an unconditional push so a caster's
-        // items array doesn't carry a name:null entry at all
-        ...(armor ? [{
-            itemId: `bot-item-${randNumString()}`,
-            name: armor.name,
-            dn: armor.dn,
-            itemCateg: "equipable",
-            itemType: "armor",
-            weaponType: undefined,
-            equipAbilities: { dmg: 0, def: 20, resistance: 10, magicDmg: 0, plusStr: 0, plusDex: 0, plusInt: 0 },
-            consumeAbilities: { plusHp: 0, plusMp: 0, plusSp: 0, plusDmg: 0, plusSpd: 1 },
-            equiped: true,
-            soulFeed: 0,
-            isEnhanceAble: true,
-            enhancedLevel: 0,
-            slots: [],
-            durability: { current: 100, max: 100 },
-            price: { coinType: "bronze", pieces: 45 },
-            qnty: 1,
-            rarity: "rare",
-            metalColor: armorMetalColor,
-        }] : []),
-        ...(!isCaster ? [{
-            itemId: `bot-item-${randNumString()}`,
-            name: BOT_PAULDRON_NAME,
-            dn: "Iron Pauldron",
-            itemCateg: "equipable",
-            itemType: "pauldron",
-            weaponType: undefined,
-            equipAbilities: { dmg: 0, def: 20, magicDmg: 0, plusStr: 0, plusDex: 0, plusInt: 0 },
-            consumeAbilities: { plusHp: 0, plusMp: 0, plusSp: 0, plusDmg: 0, plusSpd: 1 },
-            equiped: true,
-            soulFeed: 0,
-            isEnhanceAble: true,
-            enhancedLevel: 0,
-            slots: [],
-            durability: { current: 100, max: 100 },
-            price: { coinType: "bronze", pieces: 30 },
-            qnty: 1,
-            rarity: "rare",
-            metalColor: pauldronMetalColor,
-        }] : []),
     ]
 }
+
+// ============================================================
+// BOT PROGRESSION
+// ============================================================
+// Called once per confirmed kill by a bot (the isLethal branch of its own
+// dealDamage callback). Owns the entire chain so there is exactly one place
+// that decides how a bot grows:
+//
+//   +1 exp  ->  level when exp reaches maxExp  ->  +50 hp, maxExp +10
+//           ->  a random equipable every 5th level
+//
+// A while loop rather than a single check, because a future change that
+// grants more than 1 exp per kill (a boss, a bonus) could cross more than one
+// threshold at once - this way that cannot silently swallow a level.
+//
+// Everything is broadcast, because a bot has no client of its own to report
+// from: the stat changes ride on the existing "userJoined" full-state
+// snapshot (bots are in `players`, which every client reads), while a gear
+// reward additionally emits "equiped-item" so already-connected clients put
+// the new piece on the bot they are already rendering, instead of only
+// showing it to whoever joins next.
+function grantBotKillExp(botPlayer: Tplayers, isCaster: boolean){
+    botPlayer.exp = (botPlayer.exp ?? 0) + BOT_EXP_PER_KILL
+    botPlayer.maxExp = botPlayer.maxExp ?? BOT_STARTING_MAX_EXP
+
+    let leveledUp = false
+    while(botPlayer.exp >= botPlayer.maxExp){
+        // carry the remainder rather than resetting to 0, so overshoot is
+        // never thrown away
+        botPlayer.exp -= botPlayer.maxExp
+        botPlayer.maxExp += BOT_MAX_EXP_GROWTH
+        botPlayer.lvl += 1
+        botPlayer.maxHp = (botPlayer.maxHp ?? BOT_MAX_HP) + BOT_LEVEL_UP_HP_BONUS
+        // healed by the same amount rather than to full - levelling should
+        // help mid-fight without being a free reset
+        botPlayer.hp = (botPlayer.hp ?? BOT_MAX_HP) + BOT_LEVEL_UP_HP_BONUS
+        leveledUp = true
+
+        if(botPlayer.lvl % BOT_REWARD_LEVEL_INTERVAL === 0){
+            grantBotLevelReward(botPlayer, isCaster)
+        }
+    }
+
+    if(leveledUp){
+        log(`[botLevel] ${botPlayer.name} reached lvl ${botPlayer.lvl} (hp ${botPlayer.hp}/${botPlayer.maxHp}, next at ${botPlayer.maxExp} exp)`)
+    }
+}
+
+// One equipable from recources/botItems.ts, chosen off the bot's own
+// archetype. Null when every slot its pool offers is already filled - a bot
+// that has everything simply gets nothing rather than a duplicate it could
+// never render.
+//
+// The bot's own level is handed down because it biases the METAL roll, not
+// which item comes out: a higher level bot gets more draws against the same
+// metal ladder and keeps the best, so its gear visibly improves as it
+// survives instead of staying on a flat table forever.
+function grantBotLevelReward(botPlayer: Tplayers, isCaster: boolean){
+    const botType = botTypeFor(isCaster)
+    const reward = rollBotLevelReward(botType, botPlayer.items, botPlayer.lvl)
+    if(!reward) return
+
+    botPlayer.items = [...(botPlayer.items ?? []), reward]
+
+    // Put it on NOW for every client already rendering this bot. A client
+    // that joins later gets it from the items array in the join snapshot
+    // instead, so both paths are covered.
+    io.emit("equiped-item", {
+        ownerId: botPlayer.owner,
+        itemName: reward.name,
+        itemModelName: reward.modelName,
+        itemModelStyle: undefined,
+        itemType: reward.itemType,
+        currentPlaceId: botPlayer.currentPlace.placeId,
+        metalColor: reward.metalColor,
+        weaponType: undefined,
+        hairVisible: reward.hairVisible,
+        parts: undefined,
+    })
+
+    if(reward._announce){
+        log(`[botLevel] *** ${botPlayer.name} rolled a ${String(reward.rarity).toUpperCase()} ${reward.dn} at lvl ${botPlayer.lvl} ***`)
+        // world chat announcement - dragonscale is 0.8% of a metal roll and
+        // black is 0.2%, rare enough that it is worth everyone seeing. Reuses
+        // the channel the chat system already listens on rather than inventing
+        // a new event. msgType:"system" is what tells worldsocket.js to render
+        // it as a plain announcement line (appendSystemMessage) instead of a
+        // "name: message" chat line - this has no sender.
+        io.emit("worldChatMessage", {
+            name: "",
+            message: `${botPlayer.name} has found a ${reward.dn}!`,
+            ownerId: botPlayer.owner,
+            msgType: "system",
+        })
+    } else {
+        log(`[botLevel] ${botPlayer.name} earned ${reward.dn} at lvl ${botPlayer.lvl}`)
+    }
+}
+
 
 // overrides lets a caller pin down exactly who/where/what instead of the
 // periodic spawn interval's own fully-random pick (attitude, place, and
@@ -1952,6 +2022,8 @@ function spawnBot(overrides?: { attitudeName?: string, pos?: { x: number, z: num
         IsInVulnerable: false,
         hp: BOT_MAX_HP,
         maxHp: BOT_MAX_HP,
+        exp: 0,
+        maxExp: BOT_STARTING_MAX_EXP,
         attitudeName,
         goal: buildBotGoal("leveling"),
         currentMood: attitudeName === "lazy" ? "rest" : moodForGoalCateg("leveling"),
@@ -1959,6 +2031,196 @@ function spawnBot(overrides?: { attitudeName?: string, pos?: { x: number, z: num
     }
 
     players.push(botPlayer)
+
+    // The VISUAL half of a bot attack - the swing/dash/cast every client
+    // actually sees - shared by both damage callbacks below.
+    //
+    // Split out because a bot now has two things it can hit: a world
+    // enemy (hunting, or an order from its owner) and a PLAYER
+    // (retaliation - see npcBrain.ts's own notifyAttackedBy). Those
+    // resolve and apply damage completely differently, but they look
+    // exactly the same from the outside - the same sword swing, the same
+    // dashstrike flourish, the same magic circle. `landHit` is the only
+    // part that differs, handed in by the caller and fired at whatever
+    // delay this particular attack's own animation needs.
+    //
+    // liveTargetPos is debug-only (the [botAim] log below): it lets a
+    // server-side aim bug be diffed directly against worldsocket.js's own
+    // matching [clientBotAim] log, instead of guessing which target a
+    // given cast was even aimed at.
+    const performBotAttack = (
+        targetId: string,
+        dmgDetails: { physicalDmg: number, weaponDmg: number },
+        liveTarget: { x: number, z: number } | null,
+        landHit: () => void,
+    ) => {
+        // log(`[botAim] ${owner} pos=(${botPlayer.pos.x.toFixed(2)},${botPlayer.pos.z.toFixed(2)}) dirYaw=${(botPlayer.dirYaw ?? 0).toFixed(3)} target=${targetId} targetPos=(${liveTarget?.x.toFixed(2)},${liveTarget?.z.toFixed(2)})`)
+        // createcharacter.js only ever parents a weapon mesh onto rHand
+        // if mode==="fighting" AT CREATION TIME (see its own
+        // det.items.forEach block) - every bot spawns with mode "idle",
+        // so its weapon (sword OR staff) starts sheathed on
+        // weaponSocket regardless of style. Read once here so every
+        // branch below (melee's normal swing/dashstrike AND the
+        // caster's own cast) shares the same equipped weapon and can
+        // re-parent it onto rHand the same way.
+        const equippedWeapon = botItems.find(itm => itm.itemType === "weapon" && itm.equiped)
+        const weaponType = equippedWeapon?.weaponType ?? "sword"
+
+        // Melee-style bots (attitude.weapon > 0.5 - same threshold
+        // npcBrain.ts's own isMeleeStyle() uses, must stay in sync) get
+        // dashstrikeSkill as their signature close-distance move;
+        // everyone else gets a real long-distance projectile cast
+        // instead of silently landing CAST_DMG with nothing visible -
+        // see BOT_DASH_SKILL/BOT_CAST_SKILLS' own header comment for why
+        // broadcasting a real "skillactivated" cast for a bot is safe
+        // (never actually double-applies damage on any client).
+        if(attitude.weapon > 0.5){
+            // dashstrike as a rare flourish, not the bot's every swing -
+            // per spec, only a ~20% roll (Math.random() > 0.8) actually
+            // fires it; the other ~80% is just a plain sword/spear swing,
+            // same "player-attacked" broadcast a real melee swing already
+            // produces (attackingSystem.js's attack() plays whatever
+            // animName rides along, AND re-parents the sword onto rHand
+            // itself via its own equipSword(hasWeapon, true) call - no
+            // separate re-equip step needed on this path, unlike dashstrike's).
+            if(Math.random() > 0.8){
+                io.emit("skillactivated", {
+                    ownerId: owner,
+                    // per-bot-unique name (skillEffects.js's pendingCasts is
+                    // keyed by this string alone, shared across EVERY
+                    // caster it ever sees - see BOT_CAST_SKILLS' own
+                    // comment below for why the literal shared name is
+                    // unsafe here) - dashstrike has no pendingCasts entry
+                    // of its own (castDuration:0, nothing to track), so
+                    // this isn't load-bearing for melee bots today, just
+                    // consistent/future-proof against that ever changing
+                    skill: { ...BOT_DASH_SKILL, name: `${BOT_DASH_SKILL.name}_${owner}` },
+                    currentPlaceId: botPlayer.currentPlace.placeId,
+                    casterStats: BOT_CASTER_STATS,
+                    // re-faces the caster ONE more time, client-side, in the
+                    // exact same synchronous "skillactivated" handler that's
+                    // about to read the body's facing to aim the cast - a
+                    // plain angle now (dirYaw), not a dirTarg point - see
+                    // BotMoveCallback's own header comment (npcBrain.ts)
+                    // for why a point silently breaks once this bot's
+                    // client-rendered position has drifted from what the
+                    // server believes it is
+                    dirYaw: botPlayer.dirYaw,
+                    botTcpPos: botPlayer.pos,
+                    // debug only - lets worldsocket.js's own matching
+                    // [clientBotAim] log reference the EXACT same
+                    // target/position this tick's own [botAim] server
+                    // log just printed, so the two can be diffed
+                    // side by side instead of guessing which enemy a
+                    // given cast was even aimed at
+                    debugTargetId: targetId,
+                    debugTargetPos: liveTarget ? { x: liveTarget.x, z: liveTarget.z } : null,
+                })
+                // dashstrikeSkill's own real castDashSkill is entirely
+                // PLAYER-shaped (physics impulse/isCaster-gated), which is
+                // why it never visibly moves a bot on anyone's screen - same
+                // reason client/src/npc/duelSystem.js's own dashstrike-using
+                // npcFighters don't reuse it either, and instead run their
+                // OWN dedicated locallyTranslate ramp (performOpponentDashStrike).
+                // "bot-dashing" is that same idea, broadcast so every
+                // client's own renderer.js can run that exact ramp locally
+                // against this bot's body - see BOT_DASH_MOVE_DURATION_MS's
+                // own comment for why 1000ms (not dashstrikeSkill's own
+                // 350ms) is what actually reads as a real lunge.
+                io.emit("bot-dashing", {
+                    ownerId: owner,
+                    distance: BOT_DASH_SKILL.dash.distance,
+                    durationMs: BOT_DASH_MOVE_DURATION_MS,
+                    // real weapon data (same fields createcharacter.js's own
+                    // det.items.forEach block reads at creation time) so the
+                    // client's own "bot-dashing" handler can re-parent the
+                    // ALREADY-CREATED sword mesh onto rHand, same as a real
+                    // player's attack() call already does on every swing
+                    weaponName: equippedWeapon?.name,
+                    parts: equippedWeapon?.parts,
+                    weaponType: equippedWeapon?.weaponType,
+                    metalColor: equippedWeapon?.metalColor,
+                    botTcpPos: botPlayer.pos
+                })
+                // damage lands once the dash has had time to actually reach
+                // the target, same reasoning performOpponentDashStrike's own
+                // delayed hit gives (duelSystem.js) - instant would land
+                // before the lunge itself has even visibly finished
+                setTimeout(landHit, BOT_DASH_MOVE_DURATION_MS)
+            } else {
+                const animPool = weaponType === "spear" ? ["spearattack1", "spearattack2"] : ["swordattack1", "swordattack2"]
+                io.emit("player-attacked", {
+                    owner,
+                    pos: botPlayer.pos,
+                    dirTarg: botPlayer.dirTarg,
+                    dmgDetails: { physicalDmg: dmgDetails.physicalDmg, weaponDmg: dmgDetails.weaponDmg, magicDmg: 0, accuracy: 1 },
+                    hasWeapon: equippedWeapon?.name ?? false,
+                    isMissed: false,
+                    weaponType,
+                    currentPlaceId: botPlayer.currentPlace.placeId,
+                    atkSpd: 0.2,
+                    animName: pickOne(animPool),
+                })
+                landHit()
+            }
+        } else {
+            io.emit("skillactivated", {
+                ownerId: owner,
+                // MUST be unique per bot, not the shared literal
+                // "singlecast" - castOffenseSkill's own
+                // cancelPendingCast(skill.name) call cancels whatever
+                // OTHER cast (any caster, bot or real player) currently
+                // owns that exact name in skillEffects.js's pendingCasts
+                // map (keyed by name alone, see its own header comment -
+                // built for one player's own multiple DIFFERENT skills
+                // staying pending at once, never for two DIFFERENT
+                // casters sharing one identical name). With every
+                // caster bot sending the literal "singlecast", any two
+                // whose 3-second cast windows overlapped were silently
+                // cancelling each other's still-charging cast before
+                // its bolt ever fired - confirmed from an actual
+                // screenshot (several magic circles blooming with none
+                // of them clearly landing a correctly-aimed shot).
+                // Nothing else keys off the literal name (every cast
+                // dispatch/visual reads skill.effects/projectileVisual,
+                // not skill.name), so suffixing it is fully safe.
+                skill: { ...castSkillTemplate, name: `${castSkillTemplate.name}_${owner}` },
+                currentPlaceId: botPlayer.currentPlace.placeId,
+                casterStats: BOT_CASTER_STATS,
+                // see the melee branch's own identical field above - same
+                // "re-face right before this exact cast reads the body's
+                // rotation" fix, now a plain angle instead of a point
+                dirYaw: botPlayer.dirYaw,
+                botTcpPos: botPlayer.pos,
+                // re-parents the caster's own staff onto rHand, same
+                // "createcharacter.js only equips onto rHand if
+                // mode==='fighting' at CREATION time" gap the melee
+                // branch's own bot-dashing payload already fixes for a
+                // sword - a caster's mode is "casting", never
+                // "fighting", so its staff would otherwise stay
+                // sheathed on its back forever, never actually held
+                // while casting
+                weaponName: equippedWeapon?.name,
+                parts: equippedWeapon?.parts,
+                weaponType: equippedWeapon?.weaponType,
+                metalColor: equippedWeapon?.metalColor,
+                // debug only - see the melee branch's own identical
+                // fields above for what this is for
+                debugTargetId: targetId,
+                debugTargetPos: liveTarget ? { x: liveTarget.x, z: liveTarget.z } : null,
+            })
+            // castSkillTemplate.castDuration (seconds) is how long every
+            // client's own castOffenseSkill sits on the magic circle
+            // before it actually looses the bolt - landing the real
+            // damage on that same delay (instead of instantly, like
+            // melee above) is what keeps the enemy's hp bar dropping
+            // roughly in sync with the bolt's own visible impact
+            // instead of several seconds before any client even shows
+            // an explosion. Per-skill now (2-3s depending which one this
+            // bot got assigned), not a single hardcoded value.
+            setTimeout(landHit, castSkillTemplate.castDuration * 1000)
+        }
+    }
 
     const brain = new Brain(attitude, { x: spawnX, z: spawnZ }, (pos, dirYaw, mode, moving) => {
         // botPlayer.pos kept in sync server-side (Brain's own internal
@@ -2054,34 +2316,22 @@ function spawnBot(overrides?: { attitudeName?: string, pos?: { x: number, z: num
                 approachZ: foundClosest.z + Math.sin(angle) * approachRadius,
             }
         },
-        // same applyDamageToEnemy() every real player's own "enemyIsHit"
-        // handler already goes through (see that function's own header
-        // comment) - a bot-dealt hit is real, server-tracked damage that
-        // can actually kill the enemy, visible/consistent for every
-        // connected client, not a bot-only illusion
+        // hunting, and orders from an owner - a bot-dealt hit on a world
+        // enemy is real, server-tracked damage through the same
+        // applyDamageToEnemy() every real player's own "enemyIsHit" handler
+        // already goes through, so it can actually kill and is consistent
+        // for every connected client, not a bot-only illusion
         dealDamage: (targetId, dmgDetails) => {
-            // real numbers instead of re-reading the code and asserting
-            // it's correct - own position, own facing (already refreshed by
-            // checkCombat's own onMove call THIS exact tick, before this
-            // callback ever runs), and the actual target's own live x/z,
-            // all printed at the exact moment an attack fires. Compare
-            // botDirTarg-botPos (the direction actually broadcast) against
-            // targetPos-botPos (where the target actually was) - if those
-            // two vectors don't point the same way, the bug is server-side
-            // and this proves it; if they DO match but the client still
-            // renders it facing elsewhere, the bug is purely client-side.
             const liveTarget = tcpEnemies.find(enem => enem._id === targetId)
-            // log(`[botAim] ${owner} pos=(${botPlayer.pos.x.toFixed(2)},${botPlayer.pos.z.toFixed(2)}) dirYaw=${(botPlayer.dirYaw ?? 0).toFixed(3)} target=${targetId} targetPos=(${liveTarget?.x.toFixed(2)},${liveTarget?.z.toFixed(2)})`)
-
-            // an enemy with no target yet doesn't otherwise notice a bot at
-            // all (see registerTargetIfNone's own header comment - a bot
-            // has no client of its own to run the real atkDetection
-            // proximity trigger real players register through). Landing a
-            // hit is the closest available stand-in for "is now engaging
-            // this enemy up close" - won't steal a target away from
-            // whoever the enemy is already fighting, same guard the real
-            // player path already enforces.
-            const landHit = () => {
+            performBotAttack(targetId, dmgDetails, liveTarget ? { x: liveTarget.x, z: liveTarget.z } : null, () => {
+                // an enemy with no target yet doesn't otherwise notice a bot
+                // at all (see registerTargetIfNone's own header comment - a
+                // bot has no client of its own to run the real atkDetection
+                // proximity trigger real players register through). Landing
+                // a hit is the closest available stand-in for "is now
+                // engaging this enemy up close" - won't steal a target away
+                // from whoever the enemy is already fighting, same guard the
+                // real player path already enforces.
                 const isLethal = applyDamageToEnemy({
                     targetId,
                     dmgDetails,
@@ -2091,186 +2341,67 @@ function spawnBot(overrides?: { attitudeName?: string, pos?: { x: number, z: num
                 })
                 registerTargetIfNone(targetId, owner, botPlayer.pos)
 
-                // a kill levels the bot up - flat hp/maxHp bump, no other
-                // stat curve to feed off (bots don't carry a real
-                // strength/dex/etc progression the way a real character
-                // does)
+                // A kill grants EXP, it no longer levels the bot outright.
+                // grantBotKillExp owns the whole progression (exp -> level ->
+                // hp -> gear reward) and broadcasts whatever changed.
                 if(isLethal){
-                    botPlayer.lvl += 1
-                    botPlayer.maxHp = (botPlayer.maxHp ?? BOT_MAX_HP) + BOT_LEVEL_UP_HP_BONUS
-                    botPlayer.hp = (botPlayer.hp ?? BOT_MAX_HP) + BOT_LEVEL_UP_HP_BONUS
+                    grantBotKillExp(botPlayer, isCaster)
                     // the only real progress signal a "leveling" goal has
                     // right now - "minning"/"chopwoods" have no equivalent
-                    // yet since bots don't actually do either of those
+                    // yet since bots do not actually do either of those
                     if(botPlayer.goal?.categ === "leveling") botPlayer.goal.current += 1
                 }
+            })
+        },
+        // ONE specific enemy by id - what an ORDERED target is tracked by
+        // (npcBrain.ts's own commandAttack/fightCommandedTarget). Returning
+        // null once it stops resolving is exactly how "the target died" is
+        // detected there, so the _disabled/place filters matter: a servant
+        // should come back to its owner when its quarry is gone for ANY
+        // reason, not just a killing blow.
+        getEnemyById: (id: string) => {
+            const enem = tcpEnemies.find(e => e._id === id && !e._disabled && e.currentPlaceId === botPlayer.currentPlace.placeId)
+            if(!enem) return null
+            // same per-bot approach offset getNearestEnemy applies, so
+            // several servants sent at one enemy still ring it instead of
+            // stacking on its exact center
+            const angle = hashOwnerToAngle(owner)
+            const approachRadius = attitude.weapon > 0.5 ? BOT_MELEE_APPROACH_RADIUS : BOT_CAST_APPROACH_RADIUS
+            return {
+                _id: enem._id, x: enem.x, z: enem.z, hp: enem.hp,
+                approachX: enem.x + Math.cos(angle) * approachRadius,
+                approachZ: enem.z + Math.sin(angle) * approachRadius,
             }
+        },
+        // RETALIATION - hitting a PLAYER back (npcBrain.ts's fightAttacker).
+        // A completely different damage path from an enemy's: a real
+        // player's hp is not tracked here at all (see the "enemy-attacked"
+        // handler's own comment on that convention), so the BROADCAST is the
+        // damage - their own client applies it on receiving this, exactly
+        // the way it already does for a hit from another player.
+        dealDamageToPlayer: (targetOwnerId, dmgDetails) => {
+            const victim = players.find(pl => pl.owner === targetOwnerId)
+            performBotAttack(targetOwnerId, dmgDetails, victim ? { x: victim.pos.x, z: victim.pos.z } : null, () => {
+                // the victim being ANOTHER BOT cannot arise from retaliation
+                // alone (a bot only ever swings at an enemy, or at whoever
+                // hit it first - nothing makes one open on another), but it
+                // is handled rather than assumed away: both of these no-op
+                // cleanly on a real player, so this one path stays correct
+                // either way.
+                const dmgToApply = mitigatedBotDamage(targetOwnerId, dmgDetails.physicalDmg)
+                applyDamageToBot(targetOwnerId, dmgToApply)
+                // ...and a bot that got hit fights back like anything else
+                bots.find(b => b.player.owner === targetOwnerId)?.brain.notifyAttackedBy(owner)
 
-            // createcharacter.js only ever parents a weapon mesh onto rHand
-            // if mode==="fighting" AT CREATION TIME (see its own
-            // det.items.forEach block) - every bot spawns with mode "idle",
-            // so its weapon (sword OR staff) starts sheathed on
-            // weaponSocket regardless of style. Read once here so every
-            // branch below (melee's normal swing/dashstrike AND the
-            // caster's own cast) shares the same equipped weapon and can
-            // re-parent it onto rHand the same way.
-            const equippedWeapon = botItems.find(itm => itm.itemType === "weapon" && itm.equiped)
-            const weaponType = equippedWeapon?.weaponType ?? "sword"
-
-            // Melee-style bots (attitude.weapon > 0.5 - same threshold
-            // npcBrain.ts's own isMeleeStyle() uses, must stay in sync) get
-            // dashstrikeSkill as their signature close-distance move;
-            // everyone else gets a real long-distance projectile cast
-            // instead of silently landing CAST_DMG with nothing visible -
-            // see BOT_DASH_SKILL/BOT_CAST_SKILLS' own header comment for why
-            // broadcasting a real "skillactivated" cast for a bot is safe
-            // (never actually double-applies damage on any client).
-            if(attitude.weapon > 0.5){
-                // dashstrike as a rare flourish, not the bot's every swing -
-                // per spec, only a ~20% roll (Math.random() > 0.8) actually
-                // fires it; the other ~80% is just a plain sword/spear swing,
-                // same "player-attacked" broadcast a real melee swing already
-                // produces (attackingSystem.js's attack() plays whatever
-                // animName rides along, AND re-parents the sword onto rHand
-                // itself via its own equipSword(hasWeapon, true) call - no
-                // separate re-equip step needed on this path, unlike dashstrike's).
-                if(Math.random() > 0.8){
-                    io.emit("skillactivated", {
-                        ownerId: owner,
-                        // per-bot-unique name (skillEffects.js's pendingCasts is
-                        // keyed by this string alone, shared across EVERY
-                        // caster it ever sees - see BOT_CAST_SKILLS' own
-                        // comment below for why the literal shared name is
-                        // unsafe here) - dashstrike has no pendingCasts entry
-                        // of its own (castDuration:0, nothing to track), so
-                        // this isn't load-bearing for melee bots today, just
-                        // consistent/future-proof against that ever changing
-                        skill: { ...BOT_DASH_SKILL, name: `${BOT_DASH_SKILL.name}_${owner}` },
-                        currentPlaceId: botPlayer.currentPlace.placeId,
-                        casterStats: BOT_CASTER_STATS,
-                        // re-faces the caster ONE more time, client-side, in the
-                        // exact same synchronous "skillactivated" handler that's
-                        // about to read the body's facing to aim the cast - a
-                        // plain angle now (dirYaw), not a dirTarg point - see
-                        // BotMoveCallback's own header comment (npcBrain.ts)
-                        // for why a point silently breaks once this bot's
-                        // client-rendered position has drifted from what the
-                        // server believes it is
-                        dirYaw: botPlayer.dirYaw,
-                        botTcpPos: botPlayer.pos,
-                        // debug only - lets worldsocket.js's own matching
-                        // [clientBotAim] log reference the EXACT same
-                        // target/position this tick's own [botAim] server
-                        // log just printed, so the two can be diffed
-                        // side by side instead of guessing which enemy a
-                        // given cast was even aimed at
-                        debugTargetId: targetId,
-                        debugTargetPos: liveTarget ? { x: liveTarget.x, z: liveTarget.z } : null,
-                    })
-                    // dashstrikeSkill's own real castDashSkill is entirely
-                    // PLAYER-shaped (physics impulse/isCaster-gated), which is
-                    // why it never visibly moves a bot on anyone's screen - same
-                    // reason client/src/npc/duelSystem.js's own dashstrike-using
-                    // npcFighters don't reuse it either, and instead run their
-                    // OWN dedicated locallyTranslate ramp (performOpponentDashStrike).
-                    // "bot-dashing" is that same idea, broadcast so every
-                    // client's own renderer.js can run that exact ramp locally
-                    // against this bot's body - see BOT_DASH_MOVE_DURATION_MS's
-                    // own comment for why 1000ms (not dashstrikeSkill's own
-                    // 350ms) is what actually reads as a real lunge.
-                    io.emit("bot-dashing", {
-                        ownerId: owner,
-                        distance: BOT_DASH_SKILL.dash.distance,
-                        durationMs: BOT_DASH_MOVE_DURATION_MS,
-                        // real weapon data (same fields createcharacter.js's own
-                        // det.items.forEach block reads at creation time) so the
-                        // client's own "bot-dashing" handler can re-parent the
-                        // ALREADY-CREATED sword mesh onto rHand, same as a real
-                        // player's attack() call already does on every swing
-                        weaponName: equippedWeapon?.name,
-                        parts: equippedWeapon?.parts,
-                        weaponType: equippedWeapon?.weaponType,
-                        metalColor: equippedWeapon?.metalColor,
-                        botTcpPos: botPlayer.pos
-                    })
-                    // damage lands once the dash has had time to actually reach
-                    // the target, same reasoning performOpponentDashStrike's own
-                    // delayed hit gives (duelSystem.js) - instant would land
-                    // before the lunge itself has even visibly finished
-                    setTimeout(landHit, BOT_DASH_MOVE_DURATION_MS)
-                } else {
-                    const animPool = weaponType === "spear" ? ["spearattack1", "spearattack2"] : ["swordattack1", "swordattack2"]
-                    io.emit("player-attacked", {
-                        owner,
-                        pos: botPlayer.pos,
-                        dirTarg: botPlayer.dirTarg,
-                        dmgDetails: { physicalDmg: dmgDetails.physicalDmg, weaponDmg: dmgDetails.weaponDmg, magicDmg: 0, accuracy: 1 },
-                        hasWeapon: equippedWeapon?.name ?? false,
-                        isMissed: false,
-                        weaponType,
-                        currentPlaceId: botPlayer.currentPlace.placeId,
-                        atkSpd: 0.2,
-                        animName: pickOne(animPool),
-                    })
-                    landHit()
-                }
-            } else {
-                io.emit("skillactivated", {
-                    ownerId: owner,
-                    // MUST be unique per bot, not the shared literal
-                    // "singlecast" - castOffenseSkill's own
-                    // cancelPendingCast(skill.name) call cancels whatever
-                    // OTHER cast (any caster, bot or real player) currently
-                    // owns that exact name in skillEffects.js's pendingCasts
-                    // map (keyed by name alone, see its own header comment -
-                    // built for one player's own multiple DIFFERENT skills
-                    // staying pending at once, never for two DIFFERENT
-                    // casters sharing one identical name). With every
-                    // caster bot sending the literal "singlecast", any two
-                    // whose 3-second cast windows overlapped were silently
-                    // cancelling each other's still-charging cast before
-                    // its bolt ever fired - confirmed from an actual
-                    // screenshot (several magic circles blooming with none
-                    // of them clearly landing a correctly-aimed shot).
-                    // Nothing else keys off the literal name (every cast
-                    // dispatch/visual reads skill.effects/projectileVisual,
-                    // not skill.name), so suffixing it is fully safe.
-                    skill: { ...castSkillTemplate, name: `${castSkillTemplate.name}_${owner}` },
+                io.emit("player-is-hit", {
+                    playerId: owner,
+                    targetId: targetOwnerId,
                     currentPlaceId: botPlayer.currentPlace.placeId,
-                    casterStats: BOT_CASTER_STATS,
-                    // see the melee branch's own identical field above - same
-                    // "re-face right before this exact cast reads the body's
-                    // rotation" fix, now a plain angle instead of a point
-                    dirYaw: botPlayer.dirYaw,
-                    botTcpPos: botPlayer.pos,
-                    // re-parents the caster's own staff onto rHand, same
-                    // "createcharacter.js only equips onto rHand if
-                    // mode==='fighting' at CREATION time" gap the melee
-                    // branch's own bot-dashing payload already fixes for a
-                    // sword - a caster's mode is "casting", never
-                    // "fighting", so its staff would otherwise stay
-                    // sheathed on its back forever, never actually held
-                    // while casting
-                    weaponName: equippedWeapon?.name,
-                    parts: equippedWeapon?.parts,
-                    weaponType: equippedWeapon?.weaponType,
-                    metalColor: equippedWeapon?.metalColor,
-                    // debug only - see the melee branch's own identical
-                    // fields above for what this is for
-                    debugTargetId: targetId,
-                    debugTargetPos: liveTarget ? { x: liveTarget.x, z: liveTarget.z } : null,
+                    dmgToApply,
+                    dmgDetails: { ...dmgDetails, magicDmg: 0, accuracy: 1 },
+                    isPhysical: attitude.weapon > 0.5,
                 })
-                // castSkillTemplate.castDuration (seconds) is how long every
-                // client's own castOffenseSkill sits on the magic circle
-                // before it actually looses the bolt - landing the real
-                // damage on that same delay (instead of instantly, like
-                // melee above) is what keeps the enemy's hp bar dropping
-                // roughly in sync with the bolt's own visible impact
-                // instead of several seconds before any client even shows
-                // an explosion. Per-skill now (2-3s depending which one this
-                // bot got assigned), not a single hardcoded value.
-                setTimeout(landHit, castSkillTemplate.castDuration * 1000)
-            }
+            })
         },
         // servant-following (npcBrain.ts's own setFollowOwner/followOwner) -
         // reads the SAME live players[].pos every real player's own
@@ -2359,7 +2490,7 @@ function spawnBot(overrides?: { attitudeName?: string, pos?: { x: number, z: num
     io.emit("userJoined", {
         currentPlaceId: botPlayer.currentPlace.placeId, newPlayerName: botPlayer.name, isBot: true,
         players, placesMD, tcpEnemies, quests,
-        treasures, bonfires, wagons, harnessDeer, struckWeapons,
+        treasures, bonfires, struckWeapons,
         weather: getWeatherState()
     })
 }
@@ -2510,93 +2641,7 @@ setInterval(() => {
     })
 }, ENEMY_QUOTA_CHECK_INTERVAL_MS)
 
-// Staggered startup spawn (openworld/placeId 888) - each WAGON_HEADINGS
-// entry appears one at a time (north immediately, then the next heading
-// WAGON_STARTUP_STAGGER_MS later, and so on) instead of all 4 popping into
-// existence in the same instant the server boots. Reuses createHarnessDeer/
-// createWagon - the exact same factories the quota-check interval right
-// below already calls to top up a missing heading later - rather than a
-// second hand-built "create them all" path that could drift out of sync.
-// Runs ONCE, at module load; the quota-check interval below is what keeps
-// these topped up ongoing (e.g. if this sequence gets interrupted by a
-// restart partway through staggering).
-//
-// wagonStaggerComplete gates the quota-check interval below until this
-// entire sequence has actually finished. Without it, WAGON_QUOTA_CHECK_INTERVAL_MS's
-// own first tick (10s) would fire WHILE this is still mid-stagger (the last
-// heading here can land as late as 3 * WAGON_STARTUP_STAGGER_MS = 15s), see
-// whichever headings haven't had their turn yet as "missing", and spawn
-// them immediately right then - defeating the stagger for exactly the
-// headings it was supposed to still be delaying.
-let wagonStaggerComplete = false
-const WAGON_STARTUP_STAGGER_MS = 5 * 1000
-const wagonHeadingEntries = Object.entries(WAGON_HEADINGS)
-wagonHeadingEntries.forEach(([headingName, heading], index) => {
-    setTimeout(() => {
-        const deer = createHarnessDeer(headingName, heading)
-        harnessDeer.push(deer)
-        wagons.push(createWagon(deer))
-        log(`[wagonStagger] spawned harness deer/wagon heading: ${headingName}`)
-        io.emit("harness-deer-spawned", harnessDeer)
-        io.emit("wagons-spawned", wagons)
-        if(index === wagonHeadingEntries.length - 1) wagonStaggerComplete = true
-    }, index * WAGON_STARTUP_STAGGER_MS)
-})
 
-// wagon quota top-up (openworld/placeId 888) - same "keep at least N of
-// these alive" shape as enemyLengthsInPlace's own quota check right above,
-// not a literal "spawn 4 more every 10s forever": recources/wagons.ts's own
-// wagons are permanent (no removal path exists at all, same as bonfires),
-// so in steady state this finds nothing missing and does nothing, every
-// tick, forever - it only actually creates anything if a heading is
-// missing (the staggered startup sequence above hasn't reached it yet, got
-// interrupted by a restart, or this array got cleared some other way).
-// This is what actually explains "I don't see the wagons" if wagons was
-// never populated in the first place - restarting this server process is
-// what makes the FIRST tick of this pick that up; this interval alone
-// can't fix a client that's still holding an old cached bundle/socket
-// connection from before wagons existed at all, only a stale/empty wagons
-// array on THIS process.
-const WAGON_QUOTA_CHECK_INTERVAL_MS = 10 * 1000
-setInterval(() => {
-    // wait for the staggered startup sequence above to actually finish
-    // before this starts checking anything - see wagonStaggerComplete's
-    // own comment for why
-    if(!wagonStaggerComplete) return
-
-    // deer is the primary entity now (recources/wagons.ts's own header
-    // comment on why) - check ITS headings first, and spawn a paired
-    // wagon for anything freshly created here
-    const missingHeadings = Object.keys(WAGON_HEADINGS).filter(headingName =>
-        !harnessDeer.some(d => d.currentPlaceId === 888 && d.name === `harnessdeer-${headingName}`)
-    )
-    if(missingHeadings.length){
-        const newDeer = missingHeadings.map(headingName => createHarnessDeer(headingName, WAGON_HEADINGS[headingName]))
-        harnessDeer.push(...newDeer)
-        // a freshly topped-up deer needs its own wagon too, same 1:1
-        // pairing the staggered startup sequence above already establishes -
-        // otherwise a deer that only ever exists because THIS check
-        // created it would stay permanently cart-less
-        wagons.push(...newDeer.map(createWagon))
-        log(`[wagonQuota] topped up missing harness deer/wagon headings: ${missingHeadings.join(", ")}`)
-        io.emit("harness-deer-spawned", harnessDeer)
-        io.emit("wagons-spawned", wagons)
-        return
-    }
-
-    // deer were all already fine, but wagon is its own separate array
-    // (recources/wagons.ts's own Twagon) - check independently in case a
-    // wagon entry itself ever went missing without its deer also going
-    // missing (nothing removes either today, but this is the same "cheap
-    // to keep correct" self-healing check every other quota interval in
-    // this file already follows)
-    const deerMissingWagon = harnessDeer.filter(d => !wagons.some(w => w.deerId === d._id))
-    if(!deerMissingWagon.length) return
-
-    wagons.push(...deerMissingWagon.map(createWagon))
-    log(`[wagonQuota] topped up missing wagons for: ${deerMissingWagon.map(d => d.name).join(", ")}`)
-    io.emit("wagons-spawned", wagons)
-}, WAGON_QUOTA_CHECK_INTERVAL_MS)
 
 function removeCharacter(ownerId: string, playerName: string, placeId: number){
     log(playerName , " disconnecting ... ")

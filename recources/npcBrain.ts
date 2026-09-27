@@ -171,6 +171,30 @@ const FOLLOW_STOP_DISTANCE = 3
 // Deliberately bigger than FOLLOW_STOP_DISTANCE so there's real separation
 // between the two triggers, not just a hairline gap.
 const FOLLOW_RESUME_DISTANCE = 5
+// SERVANTS, ORDERED ATTACKS - how far a servant is allowed to get from its
+// owner while fighting something the owner told it to fight. Deliberately
+// much larger than FOLLOW_RESUME_DISTANCE (which is about staying in
+// formation while walking): a companion that broke off the instant you took
+// five steps back would be useless in a real fight, where you naturally
+// circle and reposition. But it is still a leash - past this the bot drops
+// the fight mid-swing and comes back, which is the explicit ask ("if they
+// check I am far they would stop the attacking and switch to following me
+// again"). Measured owner-to-BOT, not owner-to-enemy: what matters is how
+// far the bot has been dragged away, not where the enemy happens to be.
+const SERVANT_LEASH_DISTANCE = 25
+// RETALIATION - how long a bot stays angry at whoever hit it. A timestamp
+// window rather than "until it dies" so a hit-and-run attacker can actually
+// be disengaged from: without it, one stray swing from a passing player
+// would commit the bot to chasing them across the whole openworld forever,
+// and a servant would never get back to its owner. Refreshed on every fresh
+// hit (see notifyAttackedBy), so a real sustained fight never lapses - only
+// an attacker who stopped attacking gets dropped.
+const RETALIATE_DURATION_MS = 12000
+// ...and how far it will chase them before giving up regardless of the
+// timer. Same reasoning as the leash above, applied to an attacker instead
+// of an owner - a bot that would follow you off the edge of the map over one
+// hit reads as broken rather than fierce.
+const RETALIATE_MAX_CHASE = 35
 // flat damage numbers, not a real weapon/magic stat formula - bots have no
 // equipped gear yet (spawnBot's own items:[]), so there's no real
 // calcDmg-style input to derive this from. Cast hits harder to compensate
@@ -203,9 +227,26 @@ export type GetOwnerPos = (ownerId: string) => { x: number, z: number } | null
 // once nothing is currently locked) and, every tick after, that target's
 // own live position while chasing/fighting it.
 export type GetNearestEnemy = (x: number, z: number) => EnemyLike | null
+// ONE specific enemy by id, or null once it no longer exists (killed,
+// despawned, left the place). Distinct from getNearestEnemy on purpose: an
+// ORDERED target (see commandAttack) is whatever the owner chose to hit, not
+// whatever happens to be closest, so it has to be tracked by identity. Its
+// returning null is also exactly how "the target died" is detected - there
+// is no separate death notification to wire up.
+export type GetEnemyById = (id: string) => EnemyLike | null
+// Damage dealt to a real PLAYER (or another bot) rather than a world enemy -
+// a different path entirely, since a player is not in tcpEnemies and their hp
+// is not server-tracked (see index.ts's own "enemy-attacked" comment on that
+// convention). Used only for retaliation.
+export type DealDamageToPlayerCallback = (targetOwnerId: string, dmgDetails: { physicalDmg: number, weaponDmg: number }) => void
 export type CombatContext = {
     getNearestEnemy: GetNearestEnemy
+    getEnemyById: GetEnemyById
     dealDamage: DealDamageCallback
+    dealDamageToPlayer: DealDamageToPlayerCallback
+    // resolves ANY connected player's live position by owner id, not just a
+    // servant's own owner - retaliation reuses it to chase whoever hit this
+    // bot, which is the same lookup against the same `players` array
     getOwnerPos: GetOwnerPos
 }
 
@@ -307,6 +348,28 @@ export class Brain {
     // the two thresholds actually applies next depends on which side of
     // the gap this bot was already on, not just its current raw distance
     private followingOwner = false
+    // SERVANTS, ORDERED ATTACKS - the enemy id this bot's OWNER most
+    // recently attacked (index.ts's own "enemyIsHit" handler pushes it here
+    // for every servant that owner has). Only ever consulted while
+    // followOwnerId is set: a free bot picks its own fights.
+    //
+    // Cleared on any of three things, all in fightCommandedTarget(): the
+    // enemy no longer resolves (it died - which is the whole "after they
+    // kill the target they would follow me" behaviour, no death hook
+    // needed), the owner has walked further than SERVANT_LEASH_DISTANCE
+    // away, or the owner is gone entirely.
+    private commandedTargetId: string | null = null
+    // RETALIATION - the OWNER ID of a player/bot that hit this one, plus
+    // when that grudge lapses. Checked ahead of absolutely everything else
+    // in checkCombat, servant or not: being attacked outranks both escort
+    // duty and whatever hunt was in progress, which is the "hired or not, if
+    // I hit them they fight back" ask.
+    //
+    // Deliberately never set to this bot's own owner - see notifyAttackedBy
+    // for why a servant turning on its master would fire constantly by
+    // accident rather than rarely on purpose.
+    private retaliateTargetId: string | null = null
+    private retaliateUntil = 0
     private decisionTimer: ReturnType<typeof setTimeout> | null = null
     private moveTimer: ReturnType<typeof setInterval> | null = null
     private combatTimer: ReturnType<typeof setInterval> | null = null
@@ -385,19 +448,37 @@ export class Brain {
     // the instant any enemy exists anywhere in its place, it locks on and
     // keeps re-aiming at that same lookup's result every tick (whatever's
     // currently closest) until the place has none left at all.
+    // Every COMBAT_CHECK_MS. Three behaviours share this one tick, in a
+    // strict priority order, and each returns the moment it takes control:
+    //
+    //   1. RETALIATION - something hit me. Outranks everything, servant or
+    //      not, because being attacked is not optional.
+    //   2. SERVANT - I belong to someone. If they told me what to hit (by
+    //      hitting it themselves) I fight that; otherwise I stay with them.
+    //   3. FREE HUNTING - the original behaviour, unchanged: lock onto the
+    //      nearest enemy anywhere in this place and go.
+    //
+    // The actual steering/facing/range logic is NOT written three times -
+    // all three call engage() below, which owns it. These branches only
+    // decide WHO to point it at, and what to damage once it reports being
+    // in range.
     private checkCombat(){
         const p = this.vehicle.position
 
-        // SERVANTS - takes over movement/target entirely while serving an
-        // owner, ahead of even LOOKING for an enemy - a recruited bot is a
-        // companion first, not expected to wander off mid-escort to go
-        // pick a fight (see followOwner()'s own comment for the full
-        // "why exclusively this, nothing else" reasoning)
+        // 1. RETALIATION
+        if(this.retaliateTargetId && this.fightAttacker(p)) return
+
+        // 2. SERVANT
         if(this.followOwnerId){
+            if(this.commandedTargetId && this.fightCommandedTarget(p)) return
             this.followOwner(p)
             return
         }
 
+        // 3. FREE HUNTING - unchanged. getNearestEnemy has NO distance cap,
+        // so this single lookup IS the bot's hunting behavior: the instant
+        // any enemy exists anywhere in its place it locks on and keeps
+        // re-aiming at whatever's currently closest until the place has none.
         const target = this.combat.getNearestEnemy(p.x, p.z)
 
         if(!target){
@@ -408,22 +489,108 @@ export class Brain {
                 // holding still in attack range, leaving it visually stuck
                 // in "fighting" mode/pose with nothing left to fight)
                 this.combatTargetId = null
-                this.moving = false
-                this.arrive.active = false
-                this.vehicle.velocity.set(0, 0, 0)
-                this.mode = "idle"
-                // arbitrary "face world +Z" placeholder, same as stop()'s
-                // own identical fallback - there's no meaningful facing
-                // left to report once the hunt is over, this just avoids
-                // sending a stale/undefined angle
-                this.onMove({ x: p.x, y: RESTING_Y, z: p.z }, 0, this.mode, false)
+                this.haltAndIdle(p)
             }
             return
         }
         this.combatTargetId = target._id
 
-        const dx = target.x - p.x
-        const dz = target.z - p.z
+        if(!this.engage(p, target.x, target.z, target.approachX, target.approachZ)) return
+        if(!this.tryAttackNow()) return
+        const dmg = this.isMeleeStyle() ? MELEE_DMG : CAST_DMG
+        this.combat.dealDamage(target._id, { physicalDmg: dmg, weaponDmg: 0 })
+    }
+
+    // RETALIATION - fight back against whoever hit this bot. Returns false
+    // when the grudge should be dropped (expired, attacker gone, or chased
+    // far enough), which lets checkCombat fall through to whatever this bot
+    // would normally be doing.
+    //
+    // Note what is NOT here: no getNearestEnemy call, no switching to a
+    // closer enemy. While retaliating the attacker IS the target, even if
+    // something else is nearer - "fight back" means fight back at them.
+    private fightAttacker(p: YukaVector3): boolean {
+        if(Date.now() >= this.retaliateUntil){
+            this.retaliateTargetId = null
+            return false
+        }
+        const attackerPos = this.combat.getOwnerPos(this.retaliateTargetId!)
+        // attacker disconnected, died, or changed place - nothing to chase
+        if(!attackerPos){
+            this.retaliateTargetId = null
+            return false
+        }
+        // gave them enough of a chase. Measured from the bot's CURRENT
+        // position, so this is "how far have I been led away", the same
+        // measure SERVANT_LEASH_DISTANCE uses
+        if(Math.hypot(attackerPos.x - p.x, attackerPos.z - p.z) > RETALIATE_MAX_CHASE){
+            this.retaliateTargetId = null
+            return false
+        }
+
+        if(!this.engage(p, attackerPos.x, attackerPos.z)) return true
+        if(!this.tryAttackNow()) return true
+        const dmg = this.isMeleeStyle() ? MELEE_DMG : CAST_DMG
+        this.combat.dealDamageToPlayer(this.retaliateTargetId!, { physicalDmg: dmg, weaponDmg: 0 })
+        return true
+    }
+
+    // SERVANTS, ORDERED ATTACKS - fight the enemy this bot's owner is
+    // fighting. Returns false to hand control back to plain following, which
+    // is what produces every "go back to my owner" case:
+    //
+    //   target no longer resolves  -> it died, or despawned  -> follow
+    //   owner further than leash   -> "I am far"             -> follow
+    //   owner not resolvable       -> they left/disconnected -> follow
+    //
+    // All three clear commandedTargetId, so the bot does not re-acquire the
+    // same fight on the very next tick. The owner attacking again re-issues
+    // the order (index.ts's own "enemyIsHit" handler), which is the
+    // intended way back in.
+    private fightCommandedTarget(p: YukaVector3): boolean {
+        const target = this.combat.getEnemyById(this.commandedTargetId!)
+        if(!target){
+            this.commandedTargetId = null
+            return false
+        }
+        const ownerPos = this.combat.getOwnerPos(this.followOwnerId!)
+        if(!ownerPos){
+            this.commandedTargetId = null
+            return false
+        }
+        if(Math.hypot(ownerPos.x - p.x, ownerPos.z - p.z) > SERVANT_LEASH_DISTANCE){
+            this.commandedTargetId = null
+            return false
+        }
+
+        // mirrored onto combatTargetId too, so think()'s own "am I busy"
+        // guard and everything else that already reads it treat an ordered
+        // fight exactly like a self-chosen one
+        this.combatTargetId = target._id
+
+        if(!this.engage(p, target.x, target.z, target.approachX, target.approachZ)) return true
+        if(!this.tryAttackNow()) return true
+        const dmg = this.isMeleeStyle() ? MELEE_DMG : CAST_DMG
+        this.combat.dealDamage(target._id, { physicalDmg: dmg, weaponDmg: 0 })
+        return true
+    }
+
+    // The shared "move toward a point and fight whatever is there" body,
+    // extracted so retaliation, ordered attacks and free hunting all steer
+    // identically instead of carrying three drifting copies of it.
+    //
+    // Returns TRUE only when the bot is standing in range and facing the
+    // target - i.e. when the caller should consider actually swinging. False
+    // means this tick was spent kiting or closing distance.
+    //
+    // approachX/approachZ (optional) - a point NEAR the target rather than
+    // its exact center, so several bots converging on one enemy spread into
+    // a rough ring instead of stacking into one merged mesh. Retaliation
+    // passes none: being chased by two bots at once is rare enough not to be
+    // worth the spread, and a player is moving anyway.
+    private engage(p: YukaVector3, tx: number, tz: number, approachX?: number, approachZ?: number): boolean {
+        const dx = tx - p.x
+        const dz = tz - p.z
         const dist = Math.hypot(dx, dz)
         const range = this.isMeleeStyle() ? MELEE_RANGE : CAST_RANGE
 
@@ -450,12 +617,12 @@ export class Brain {
             this.arrive.active = true
             this.vehicle.maxSpeed = SPRINT_SPEED
             this.moving = true
-            return
+            return false
         }
 
         if(dist > range){
             // close the distance - re-aims the SAME arrive steering
-            // wandering uses at the enemy's own latest known position,
+            // wandering uses at the target's own latest known position,
             // re-checked (and re-aimed) every tick since it can move
             // between checks. Mode stays "fighting" (not "casting") for
             // BOTH styles while actually moving - renderer.js's own bot
@@ -463,47 +630,41 @@ export class Brain {
             // matching the SPRINT_SPEED this same branch sets server-side;
             // a caster-style bot chasing at "casting"+walk speed would
             // desync from what the server's own arrival timing assumes.
-            // approachX/approachZ (index.ts's own getNearestEnemy) - a point
-            // NEAR the enemy, not its exact center, so several bots sharing
-            // this same target spread into a ring instead of all beelining
-            // for the identical coordinate. Falls back to the enemy's own
-            // x/z if absent (e.g. a future caller that doesn't compute
-            // one) - moveArriveRadius only tightens to ARRIVE_RADIUS when
-            // there's an actual approach point to arrive AT precisely;
-            // walking straight at the enemy's raw center still wants the
-            // old range-wide tolerance (stop as soon as within attack range,
+            //
+            // moveArriveRadius only tightens to ARRIVE_RADIUS when there's
+            // an actual approach point to arrive AT precisely; walking
+            // straight at the target's raw center still wants the old
+            // range-wide tolerance (stop as soon as within attack range,
             // don't walk needlessly closer).
-            const hasApproachPoint = target.approachX !== undefined && target.approachZ !== undefined
-            const approachX = target.approachX ?? target.x
-            const approachZ = target.approachZ ?? target.z
+            const hasApproachPoint = approachX !== undefined && approachZ !== undefined
+            const goX = approachX ?? tx
+            const goZ = approachZ ?? tz
             this.mode = "fighting"
-            this.target = { x: approachX, z: approachZ }
+            this.target = { x: goX, z: goZ }
             this.moveArriveRadius = hasApproachPoint ? ARRIVE_RADIUS : range
-            this.arrive.target.set(approachX, 0, approachZ)
+            this.arrive.target.set(goX, 0, goZ)
             this.arrive.active = true
             this.vehicle.maxSpeed = SPRINT_SPEED
             this.moving = true
-            return
+            return false
         }
 
         // in range - hold position, but keep FACING the target's own live
         // position every single check tick (not just when an attack
-        // actually fires below) - an enemy can keep moving/repositioning
-        // while the bot is holding still on cooldown, and this is what
-        // actually keeps it turning to track that instead of freezing
-        // toward wherever the target was the last time it swung. Same
-        // dirTarg-must-match-pos.y reasoning stop()'s own comment gives
-        // (worldsocket.js's "stopped" handler uses dirTarg verbatim).
+        // actually fires) - a target can keep moving/repositioning while
+        // the bot is holding still on cooldown, and this is what actually
+        // keeps it turning to track that instead of freezing toward
+        // wherever the target was the last time it swung.
         //
-        // mode splits by style HERE (not moving) is what actually makes a
-        // caster-attitude bot visibly do something instead of just
-        // standing there while damage silently lands on cooldown - "casting"
-        // is a real, continuously-looping mode client/src/sockets/
-        // renderer.js already renders (ANIM_STATE.CASTING) for any player
-        // whose mode is "casting" and isn't moving, same mechanism a real
-        // player's own spellcast idle pose already uses. Melee bots keep
-        // "fighting" (COMBAT_IDLE) and additionally get a one-shot swing
-        // per swing via index.ts's own dealDamage callback below - a caster
+        // mode splitting by style HERE (not while moving) is what actually
+        // makes a caster-attitude bot visibly do something instead of just
+        // standing there while damage silently lands on cooldown -
+        // "casting" is a real, continuously-looping mode
+        // client/src/sockets/renderer.js already renders (ANIM_STATE.CASTING)
+        // for any player whose mode is "casting" and isn't moving, the same
+        // mechanism a real player's own spellcast idle pose already uses.
+        // Melee bots keep "fighting" (COMBAT_IDLE) and additionally get a
+        // one-shot swing via index.ts's own dealDamage callback - a caster
         // doesn't need that on top, the continuous cast loop already reads
         // as "doing something" every tick, not just at the cooldown instant.
         this.mode = this.isMeleeStyle() ? "fighting" : "casting"
@@ -517,23 +678,35 @@ export class Brain {
         // (Math.atan2(dx, dz)) - matching it here isn't load-bearing on
         // its own (any consistent convention would round-trip fine as
         // long as both ends agree), just avoids inventing a second one
-        const dirYaw = Math.atan2(facing.x, facing.z)
-        this.onMove(
-            { x: p.x, y: RESTING_Y, z: p.z },
-            dirYaw,
-            this.mode,
-            false,
-        )
+        this.onMove({ x: p.x, y: RESTING_Y, z: p.z }, Math.atan2(facing.x, facing.z), this.mode, false)
+        return true
+    }
 
-        // the actual swing/cast still only fires on its own cooldown -
-        // facing above refreshes independently of this, every tick
+    // the swing/cast cooldown gate, shared by all three combat branches -
+    // true means "fire now", and consumes the cooldown. Facing/holding still
+    // is refreshed by engage() every tick, independently of this.
+    private tryAttackNow(): boolean {
         const cooldown = this.isMeleeStyle() ? MELEE_COOLDOWN_MS : CAST_COOLDOWN_MS
         const now = Date.now()
-        if(now - this.lastAttackAt < cooldown) return
+        if(now - this.lastAttackAt < cooldown) return false
         this.lastAttackAt = now
+        return true
+    }
 
-        const dmg = this.isMeleeStyle() ? MELEE_DMG : CAST_DMG
-        this.combat.dealDamage(target._id, { physicalDmg: dmg, weaponDmg: 0 })
+    // full stop, back to idle, and tell the clients - shared by the
+    // "nothing left to hunt" and "owner is gone" branches, which both need
+    // exactly this rather than stop() (which no-ops when the bot was already
+    // holding still, leaving it stuck in a fighting pose with no target)
+    private haltAndIdle(p: YukaVector3){
+        this.moving = false
+        this.arrive.active = false
+        this.vehicle.velocity.set(0, 0, 0)
+        this.mode = "idle"
+        // arbitrary "face world +Z" placeholder, same as stop()'s own
+        // identical fallback - there's no meaningful facing left to report
+        // once there's nothing to face, this just avoids sending a
+        // stale/undefined angle
+        this.onMove({ x: p.x, y: RESTING_Y, z: p.z }, 0, this.mode, false)
     }
 
     // SERVANTS - checkCombat's own followOwnerId branch delegates here
@@ -619,6 +792,52 @@ export class Brain {
         // to remember across a boundary like this, so there's no reason to
         // carry a stale true/false over from whatever it was serving before
         this.followingOwner = false
+        // an order only ever belongs to the owner who gave it - a bot that
+        // just changed hands (or was dismissed entirely) must not still be
+        // carrying out the previous owner's last fight
+        this.commandedTargetId = null
+    }
+
+    // SERVANTS, ORDERED ATTACKS - "my owner just hit this, so it is mine to
+    // hit too". index.ts's own "enemyIsHit" handler is the only caller: it
+    // fires for EVERY attack a real player lands on an enemy, melee or
+    // skill, so simply attacking something is how you command your servants
+    // - there is no separate order button to press, which is the whole point
+    // of the design ("if I attack an enemy that enemyId would be registered
+    // to their target").
+    //
+    // No-ops for a bot that is not currently anyone's servant. A free bot
+    // picks its own fights through getNearestEnemy and should not be
+    // steerable by a stranger's swing.
+    commandAttack(enemyId: string){
+        if(!this.followOwnerId) return
+        this.commandedTargetId = enemyId
+    }
+
+    // RETALIATION - "someone hit me". index.ts's own "playerIsHit" handler
+    // calls this with whoever swung (the client's atkCollider already sends
+    // its own charState.owner as playerId, see createcharacter.js), for
+    // every bot, servant or not.
+    //
+    // A servant deliberately never retaliates against its OWN owner. The
+    // atkCollider fires on any other body its hitbox clears, so while you
+    // fight something standing next to your own companion you WILL clip it
+    // repeatedly - without this guard your servant would turn on you
+    // constantly by accident rather than rarely on purpose, which is not
+    // what "if I hit them they fight back" is asking for. It still fights
+    // back against everyone else, including other players' servants.
+    notifyAttackedBy(attackerId: string){
+        // kiting first - unchanged behaviour, caster-only, and it applies
+        // however the hit arrived (see notifyDamaged's own comment)
+        this.notifyDamaged()
+        if(!attackerId) return
+        if(attackerId === this.followOwnerId) return
+
+        this.retaliateTargetId = attackerId
+        // refreshed on every fresh hit, so a real sustained fight never
+        // lapses mid-way - only an attacker who actually stopped attacking
+        // ages out of RETALIATE_DURATION_MS
+        this.retaliateUntil = Date.now() + RETALIATE_DURATION_MS
     }
 
     // SERVANTS - index.ts's own "join-world" handler calls this the
