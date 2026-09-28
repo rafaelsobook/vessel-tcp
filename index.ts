@@ -9,6 +9,7 @@ import enemyArray, { OPENWORLD_SLIME_TERRITORY, OPENWORLD_ENEMY_BANDS } from "./
 import startingQuests, { createSlaySlimesQuest, F_RANK_QUEST_COUNT } from "./recources/quests"
 import { generateSlimes, generateFireSlimes, generateElectricSlimes, generateMonoliths, generateDarkSlimes, generateLesserDemons } from "./generate-datas/genenemy"
 import { startingTreasures } from "./recources/treasures"
+import { startingGrains, Tgrain } from "./recources/grains"
 import { Brain, ATTITUDE_PRESETS, RESTING_Y } from "./recources/npcBrain"
 import { rollBotLevelReward, botTypeFor, botDamageAfterArmor } from "./recources/botItems"
 import { getWeather, getWeatherState, rollWeather, setWeather, WEATHER_ROLL_INTERVAL_MS } from "./recources/weather"
@@ -184,6 +185,15 @@ type Tbonfire = {
     currentPlaceId: number
 }
 
+// client's campcraft.js "treelog" craft - same shape/permanence as Tbonfire
+// above (never removed once placed, only ever created via the "craft-trunk"
+// handler below, no starting/seeded array)
+type Ttrunk = {
+    craftId: string
+    pos: { x: number, y: number, z: number }
+    currentPlaceId: number
+}
+
 // A weapon struck into the ground or into an enemy's body (client's
 // itemInfoSystem.js's struckItemFunc "struck" button, and skills.js's
 // spawnProjectile - a thrown spear's env-hit/enemy-hit cases) -
@@ -232,6 +242,8 @@ let tcpEnemies = enemyArray
 let quests = startingQuests
 let treasures: Ttreasure[] = startingTreasures
 let bonfires: Tbonfire[] = []
+let trunks: Ttrunk[] = []
+let grains: Tgrain[] = startingGrains
 let struckWeapons: Tstruckweapon[] = []
 
 // enemy._id -> a per-bind counter, only used by the enemyBind handler below
@@ -578,7 +590,7 @@ io.on("connection", (socket: Socket) => {
         // already carries treasures/bonfires instead of only their deltas.
         io.emit("userJoined", { currentPlaceId: data.currentPlace.placeId, newPlayerName: data.name,
             players, placesMD, tcpEnemies, quests,
-            treasures, bonfires, struckWeapons,
+            treasures, bonfires, trunks, grains, struckWeapons,
             weather: getWeatherState()
         }) // always send the updated players count
     })
@@ -683,6 +695,16 @@ io.on("connection", (socket: Socket) => {
         const bonfire: Tbonfire = { craftId, pos: position, currentPlaceId: placeId }
         bonfires.push(bonfire)
         io.emit("bonfire-crafted", bonfire)
+    })
+
+    // client's campcraft.js "treelog" craft - same "client already placed
+    // it locally, this just relays to everyone else + replays for future
+    // joiners" trust level as "craft-bonfire" right above
+    safeOn(socket, "craft-trunk", data => {
+        const { placeId, position, craftId } = data
+        const trunk: Ttrunk = { craftId, pos: position, currentPlaceId: placeId }
+        trunks.push(trunk)
+        io.emit("trunk-crafted", trunk)
     })
 
     // client's assetcreation/creategroundweapon.js already rendered this
@@ -1066,6 +1088,12 @@ io.on("connection", (socket: Socket) => {
         console.log("treasure removed ", treasureId)
         console.log("treasures ", treasures.length)
         io.emit("treasure-removed", treasureId)
+    })
+    // client's creategrain.js on pickup - same idempotent filter + bare
+    // io.emit shape as removeTreasure right above
+    safeOn(socket, "pickupGrain", grainId => {
+        grains = grains.filter(grain => grain.grainId !== grainId)
+        io.emit("grain-removed", grainId)
     })
     safeOn(socket, "enemyWillAttack", data => {
         const { pos } = data
@@ -2490,7 +2518,7 @@ function spawnBot(overrides?: { attitudeName?: string, pos?: { x: number, z: num
     io.emit("userJoined", {
         currentPlaceId: botPlayer.currentPlace.placeId, newPlayerName: botPlayer.name, isBot: true,
         players, placesMD, tcpEnemies, quests,
-        treasures, bonfires, struckWeapons,
+        treasures, bonfires, trunks, grains, struckWeapons,
         weather: getWeatherState()
     })
 }
