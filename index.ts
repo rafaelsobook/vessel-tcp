@@ -88,6 +88,11 @@ type Tplayers = {
     _minning: boolean,
     _attacking: boolean,
     mode: string, // idle// fighting // structed // paralized //
+    // furniture seat (client's charactersystem/seating.js), null while
+    // standing. Lives on the player record so a late joiner's roster already
+    // says who's sitting where, and so it goes away on its own whenever this
+    // record does (disconnect, or join-world rebuilding it on a place change)
+    seat?: { placeId: number, seatId: string } | null,
     pos: { x: number, y: number, z: number},
     dirTarg: { x: number, y: number, z: number},
     items: any,
@@ -328,7 +333,18 @@ function logEnemyKill(enemyTarg: any, killerId: string){
 // one of ITS hits was the killing blow, to level the bot up off of.
 function applyDamageToEnemy(data: any): boolean {
     const { targetId, dmgDetails } = data
-
+    // isPhysicalDmg - true for a real weapon/fist swing OR a weapon-skill
+    // that reuses that same swing (dashstrike/blinkstrike, tagged via their
+    // own skillsData.js effects' isPhysicalDmg:true - see
+    // createEnemy.js's atkCollider hit handler and skillEffects.js's
+    // strikeWithHandCollider for how that flag actually gets onto this
+    // payload), false/undefined for a cast skill's magic damage (which
+    // still arrives in physicalDmg too - see skillEffects.js's own comment
+    // on that field reuse - this is what tells the two apart now that both
+    // shapes land here). Consumed below by physicalImmune (genenemy.ts's
+    // ghostBase) - the only per-enemy physical/magic distinction so far; no
+    // enemy has a def field at all.
+    const { isPhysicalDmg, physicalDmg, weaponDmg, magicDmg, accuracy, isCritical, weaponType } = dmgDetails
     const enemyTarg = tcpEnemies.find(ene => ene._id === targetId)
     if(!enemyTarg){
         // same shape "removeEnemy"'s own handler already broadcasts
@@ -349,7 +365,15 @@ function applyDamageToEnemy(data: any): boolean {
         log("not found enemy to be damaged, told the client to clean up its own ghost - ", targetId)
         return false
     }
-    const dmgToApply = dmgDetails.weaponDmg ? dmgDetails.weaponDmg : dmgDetails.physicalDmg
+    // physicalImmune (genenemy.ts's ghostBase) - a physical hit deals
+    // nothing. Still broadcast below rather than dropped silently, flagged
+    // isImmune, so every client's enemyIsHit (createEnemy.js) pops "miss"
+    // instead of a damage number. `as any` - only some enemy shapes in
+    // tcpEnemies declare this field, same reason the openworld top-up
+    // below already reaches for (newSlime as any).territory.
+    const isImmune = !!isPhysicalDmg && !!(enemyTarg as any).physicalImmune
+    const dmgToApply = isImmune ? 0 : (weaponDmg ? weaponDmg : physicalDmg)
+
     enemyTarg.hp -= dmgToApply
     const isLethal = enemyTarg.hp <= 0
     if(isLethal){
@@ -363,7 +387,7 @@ function applyDamageToEnemy(data: any): boolean {
     // what actually starts the burn tick/particles - already just rides
     // along for free with everything else in data, no explicit
     // destructuring/whitelisting needed here.
-    io.emit("enemy-is-hit", {...data, dmgToApply, hp: enemyTarg.hp, maxHp: enemyTarg.maxHp})
+    io.emit("enemy-is-hit", {...data, dmgToApply, isImmune, hp: enemyTarg.hp, maxHp: enemyTarg.maxHp})
     return isLethal
 }
 
@@ -526,11 +550,14 @@ io.on("connection", (socket: Socket) => {
         if(alreadyJoined && alreadyJoined.socketId !== socket.id) {
             socket.to(alreadyJoined.socketId).emit("duplicate-login", { message: "You have logged in from another device." })
         }
+        // leaving a place mid-sit - free the seat for whoever's still there
+        if(alreadyJoined?.seat) io.emit("player-stood", { ownerId: data.owner, ...alreadyJoined.seat })
         players = players.filter(user => user.owner !== data.owner)
 
         const hasWeapon = Array.isArray(data.items) && data.items.some((itm: any) => itm.itemType === "weapon" && itm.equiped)
         players.push({...data,
         mode: "idle",
+        seat: null,
         _moving: false,
         _minning: false,
         hasWeapon,
@@ -765,6 +792,34 @@ io.on("connection", (socket: Socket) => {
 
         player.weaponBlocking = isBlocking
         io.emit("emitted-weaponblock", data)
+    })
+    // client's charactersystem/seating.js - the sitter already sat down on
+    // their own screen the moment they pressed interact (same act-first
+    // trust level as everything else here). This is only where two players
+    // racing for the same seat get settled: first claim wins, the other gets
+    // "sit-rejected" and stands back up on their own client.
+    safeOn(socket, "sit-down", data => {
+        const { ownerId, placeId, seatId } = data
+        const player = players.find(user => user.owner === ownerId)
+        if(!player) return
+
+        const takenBy = players.find(user => user.owner !== ownerId && user.seat?.placeId === placeId && user.seat?.seatId === seatId)
+        if(takenBy) return socket.emit("sit-rejected", { placeId, seatId })
+
+        // switching seats without standing first - free the old one
+        if(player.seat) io.emit("player-stood", { ownerId, ...player.seat })
+        player.seat = { placeId, seatId }
+        player.mode = "sitting"
+        io.emit("player-sat", { ownerId, placeId, seatId })
+    })
+    safeOn(socket, "stand-up", data => {
+        const { ownerId } = data
+        const player = players.find(user => user.owner === ownerId)
+        if(!player?.seat) return
+
+        const seat = player.seat
+        player.seat = null
+        io.emit("player-stood", { ownerId, ...seat })
     })
     safeOn(socket, "emitLoc", data => {
         const { ownerId, pos, dirTarg, mode, weaponName} = data
@@ -1303,14 +1358,42 @@ io.on("connection", (socket: Socket) => {
 const WANDER_INTERVAL_MS = 5000
 const WANDER_RADIUS = 8
 const WANDER_CHANCE = 0.35
+// eating - the other idle-time behaviour besides wandering: the enemy holds
+// still at wherever it currently is for EAT_MIN_MS..EAT_MAX_MS. Rolled off
+// the SAME random draw as wandering (eat first, then wander, else just stay
+// idle), so WANDER_CHANCE keeps its exact old meaning - per tick that's
+// 15% eat / 35% wander / 50% stand idle. Client side ("enemy-eating" in
+// worldsocket.js) plays the enemy's own "eating" clip, or falls back to
+// "idle" for a rig that has none (only deer.glb has one right now).
+const EAT_CHANCE = 0.15
+const EAT_MIN_MS = 4000
+const EAT_MAX_MS = 9000
 const DODGE_COOLDOWN_MS = 3000
 setInterval(() => {
+    const now = Date.now()
     tcpEnemies.forEach(enem => {
-        // busy fighting/chasing a player, or bound (skill.enemyBind) -
-        // leave it alone, don't interrupt with a wander order
-        if(enem._targetId) return
+        // busy fighting/chasing a player - never eat or wander with a
+        // target. Also cancels any meal in progress, so once released it
+        // goes straight back to roaming instead of sitting out the rest of
+        // an eat timer it was pulled away from (renderer.js stops the clip
+        // on its own the moment _targetId is set client-side)
+        if(enem._targetId){
+            enem._eatingUntil = 0
+            return
+        }
+        // bound (skill.enemyBind) - leave it alone
         if(enem._disabled) return
-        if(Math.random() > WANDER_CHANCE) return
+        // mid-meal - stays put, no wander order until it's done
+        if(enem._eatingUntil && now < enem._eatingUntil) return
+
+        const roll = Math.random()
+        if(roll < EAT_CHANCE){
+            const duration = EAT_MIN_MS + Math.random() * (EAT_MAX_MS - EAT_MIN_MS)
+            enem._eatingUntil = now + duration
+            io.emit("enemy-eating", { _id: enem._id, currentPlaceId: enem.currentPlaceId, duration })
+            return
+        }
+        if(roll > EAT_CHANCE + WANDER_CHANCE) return
 
         // origPos (enemyInterface/generateEnemies - every enemy has one)
         // is the enemy's own spawn point, not wherever it currently is -
@@ -1411,9 +1494,16 @@ const BOT_BESIDE_OFFSET_DIST = 2.5
 // village bot spawned at (0,0) actually walks the whole ~130 units to those
 // slimes in one continuous, uninterrupted trip instead of only ever
 // bumbling into one by pure chance within some tighter aggro range.
+// maxBots: per-place cap, independent of (and tighter than) MAX_BOTS' own
+// server-wide total - spawnBot() below skips any place already at its cap
+// when picking one at random, and also enforces this against "spawn-bot-
+// near-me" (overrides.currentPlace), so a player can't bypass it by
+// spamming the "g" debug key while standing in the village. A place not
+// listed here (any room, etc.) has no per-place cap of its own, only the
+// shared MAX_BOTS total.
 const BOT_SPAWN_PLACES = [
-    { placeId: 1, name: "village", areaType: "village", center: { x: 0, z: 0 }, radius: 20 },
-    { placeId: 888, name: "openworld", areaType: "openworld", center: { x: 0, z: 500 }, radius: 40 },
+    { placeId: 1, name: "village", areaType: "village", center: { x: 0, z: 0 }, radius: 20, maxBots: 5 },
+    { placeId: 888, name: "openworld", areaType: "openworld", center: { x: 0, z: 500 }, radius: 40, maxBots: 15 },
 ]
 
 // known-good values, pulled straight off real npcDetails.js entries that
@@ -1960,6 +2050,13 @@ function grantBotLevelReward(botPlayer: Tplayers, isCaster: boolean){
 }
 
 
+// live bot count in one place - BOT_SPAWN_PLACES' own maxBots caps are
+// checked against this, not against bots.length (the server-wide MAX_BOTS
+// total above)
+function botCountInPlace(placeId: number): number {
+    return bots.reduce((count, b) => count + (b.player.currentPlace.placeId === placeId ? 1 : 0), 0)
+}
+
 // overrides lets a caller pin down exactly who/where/what instead of the
 // periodic spawn interval's own fully-random pick (attitude, place, and
 // position within that place's radius) - used by the "spawn-bot-near-me"
@@ -1969,6 +2066,26 @@ function grantBotLevelReward(botPlayer: Tplayers, isCaster: boolean){
 // join broadcast).
 function spawnBot(overrides?: { attitudeName?: string, pos?: { x: number, z: number }, currentPlace?: { placeId: number, name: string, areaType: string } }) {
     if (bots.length >= MAX_BOTS) return
+
+    // place picked/validated FIRST, before any of the (otherwise wasted)
+    // random owner/attitude/gender/etc. work below
+    let spawnX: number, spawnZ: number, spawnPlace: { placeId: number, name: string, areaType: string }
+    if(overrides?.pos && overrides?.currentPlace){
+        const cap = BOT_SPAWN_PLACES.find(p => p.placeId === overrides.currentPlace!.placeId)?.maxBots
+        if(cap !== undefined && botCountInPlace(overrides.currentPlace.placeId) >= cap) return
+        spawnX = overrides.pos.x
+        spawnZ = overrides.pos.z
+        spawnPlace = overrides.currentPlace
+    } else {
+        const openPlaces = BOT_SPAWN_PLACES.filter(p => botCountInPlace(p.placeId) < p.maxBots)
+        if(!openPlaces.length) return
+        const place = pickOne(openPlaces)
+        const angle = Math.random() * Math.PI * 2
+        const dist = Math.random() * place.radius
+        spawnX = place.center.x + Math.cos(angle) * dist
+        spawnZ = place.center.z + Math.sin(angle) * dist
+        spawnPlace = { placeId: place.placeId, name: place.name, areaType: place.areaType }
+    }
 
     const owner = generateUniqueBotOwner()
     const attitudeNames = Object.keys(ATTITUDE_PRESETS)
@@ -1993,20 +2110,6 @@ function spawnBot(overrides?: { attitudeName?: string, pos?: { x: number, z: num
     // explicitly instead of relying on it silently
     const rawSex = faker.person.sexType()
     const gender: "male" | "female" = rawSex === "female" ? "female" : "male"
-
-    let spawnX: number, spawnZ: number, spawnPlace: { placeId: number, name: string, areaType: string }
-    if(overrides?.pos && overrides?.currentPlace){
-        spawnX = overrides.pos.x
-        spawnZ = overrides.pos.z
-        spawnPlace = overrides.currentPlace
-    } else {
-        const place = pickOne(BOT_SPAWN_PLACES)
-        const angle = Math.random() * Math.PI * 2
-        const dist = Math.random() * place.radius
-        spawnX = place.center.x + Math.cos(angle) * dist
-        spawnZ = place.center.z + Math.sin(angle) * dist
-        spawnPlace = { placeId: place.placeId, name: place.name, areaType: place.areaType }
-    }
 
     // same shape/fields a real join-world push builds (see that handler
     // above) - items now include a real equipped weapon + boots + helmet
@@ -2323,6 +2426,12 @@ function spawnBot(overrides?: { attitudeName?: string, pos?: { x: number, z: num
             let closestDistSq = Infinity
             tcpEnemies
                 .filter(enem => enem.currentPlaceId === botPlayer.currentPlace.placeId && !enem._disabled)
+                // a melee bot can't hurt a physicalImmune enemy (ghosts) -
+                // and with no radius cap on this lookup, the village ghosts
+                // at (55, 10) sit nearer the bot spawn (0, 0) than any
+                // slime, so without this every sword bot would walk to the
+                // graveyard and whiff at a ghost forever
+                .filter(enem => !(attitude.weapon > 0.5 && (enem as any).physicalImmune))
                 .forEach(enem => {
                     const distSq = (enem.x - x) ** 2 + (enem.z - z) ** 2
                     if(distSq < closestDistSq){
@@ -2362,7 +2471,12 @@ function spawnBot(overrides?: { attitudeName?: string, pos?: { x: number, z: num
                 // real player path already enforces.
                 const isLethal = applyDamageToEnemy({
                     targetId,
-                    dmgDetails,
+                    // isPhysicalDmg - a melee bot's swing is a real weapon
+                    // hit (physicalImmune enemies shrug it off), a caster
+                    // bot's is a spell - same attitude.weapon > 0.5 split
+                    // npcBrain.ts's own isMeleeStyle() uses to pick between
+                    // MELEE_DMG and CAST_DMG in the first place
+                    dmgDetails: { ...dmgDetails, isPhysicalDmg: attitude.weapon > 0.5 },
                     playerId: owner,
                     currentPlaceId: botPlayer.currentPlace.placeId,
                     isPhysical: attitude.weapon > 0.5,
@@ -2390,6 +2504,11 @@ function spawnBot(overrides?: { attitudeName?: string, pos?: { x: number, z: num
         getEnemyById: (id: string) => {
             const enem = tcpEnemies.find(e => e._id === id && !e._disabled && e.currentPlaceId === botPlayer.currentPlace.placeId)
             if(!enem) return null
+            // an ordered melee servant sent at a physicalImmune enemy (its
+            // owner swung at a ghost - commandServantsToAttack) - null reads
+            // as "target gone" (see this function's own comment above), so
+            // it comes back to its owner instead of whiffing forever
+            if(attitude.weapon > 0.5 && (enem as any).physicalImmune) return null
             // same per-bot approach offset getNearestEnemy applies, so
             // several servants sent at one enemy still ring it instead of
             // stacking on its exact center
@@ -2673,6 +2792,10 @@ setInterval(() => {
 
 function removeCharacter(ownerId: string, playerName: string, placeId: number){
     log(playerName , " disconnecting ... ")
+    // before 'removeChar' below - lets every client free the seat and put
+    // the avatar back on its body before that body gets disposed
+    const leaving = players.find(plyr => plyr.owner === ownerId)
+    if(leaving?.seat) io.emit("player-stood", { ownerId, ...leaving.seat })
     players = players.filter(plyr => plyr.owner !== ownerId)
     tcpEnemies.forEach(enem => {
         if(enem._targetId === ownerId){

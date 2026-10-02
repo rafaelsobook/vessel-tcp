@@ -395,6 +395,103 @@ const lesserDemonBase = {
     },
 }
 
+// ghost - modelStyle "ghost" (models/monsters/ghost.glb, with real
+// idle1/running1/attack1/attack2/hit1/hit2/death clips - confirmed by
+// reading the glb's own animation list). Rendered client-side by
+// containers.js's ghostRoot + createEnemy.js's "ghost" case, textured by
+// images/textures/enemy/ghost/ghost.jpg (createMonsterMaterial's
+// convention).
+//
+// A graveyard-only enemy - generateGhosts (below) is called from
+// enemyDetails.ts once per graveYards entry (localroomdb.js), scattered
+// through that graveyard's own square footprint via scatterPosition's
+// "square" branch, not one of the openworld radial bands every other
+// openworld enemy above uses. weakness: "light" - the classic
+// undead-vs-holy-magic matchup (client's skillEffects.js's own
+// getElementDamageMultiplier reads this the same way deerBase's own
+// weakness:"fire" already does), giving a light-element caster a reason to
+// visit.
+//
+// skills - createEnemy.js's casting interval picks one at random per cast.
+// blinkstrike goes through skillEffects.js's triggerEnemyBlinkstrike (a
+// telegraphed teleport + one boosted melee hit: (stats.dmg + the skill's
+// plusDmg 100) x1.5 guaranteed crit = 165 before the player's defense).
+// darkorb goes through the generic enemy projectile path (its custom orb
+// and stick-and-grow hit both work on a player target): the skill's
+// plusDmg 260 + magDmg x20 - see magDmg below.
+const ghostBase = {
+    maxDistance: 0.6,
+    name: "ghost",
+    dn: "Restless Spirit",
+    modelStyle: "ghost",
+    elementType: "dark",
+    weakness: "light",
+    // weapons and fists pass straight through it - tcp/index.ts's
+    // applyDamageToEnemy zeroes any hit whose dmgDetails.isPhysicalDmg is
+    // true (a real swing, a thrown weapon, dashstrike/blinkstrike, a melee
+    // bot) and tells every client to pop "miss" instead of a damage number
+    // (createEnemy.js's enemyIsHit). Skills and burn ticks still land
+    // normally - they never set isPhysicalDmg.
+    physicalImmune: true,
+    stats: {
+        dmg: 10,
+        // was 16 - fireEnemySkillProjectile scales an enemy's spell by
+        // plusDmg + magDmg x20, so 16 added 320 to every cast (a 580 darkorb
+        // against a lvl 13 player's 330 hp). 2 -> darkorb 300, still the
+        // ghost's big hit, telegraphed by its own 4s cast circle.
+        magDmg: 2,
+        spd: 3.6,
+        atkSpd: 2.2,
+        accuracy: 1.2,
+        critical: 1.5,
+    },
+    skills: ['blinkstrike', 'darkorb'],
+    canDodge: true,
+    lvl: 5,
+    hp: 1800,
+    maxHp: 1800,
+    expToGain: 350,
+    // ghost.glb hovers - its mesh spans y 0.56..1.68 above its own origin,
+    // which createEnemy.js always puts at ground level regardless of
+    // bodyHeight. 1.8 (not the 1.6 first tried) keeps createHpBar's
+    // bodyHeight/2+0.1 offset clear of the top of the head instead of
+    // sitting right on it.
+    bodyHeight: 1.8,
+    bodyWidenes: 0.8,
+    effects: [
+        { effectType: 'spdrain', chance: 10, permanent: false, dn: 'SP Drained', spcost: 20, hpcost: 0, mpcost: 0, hungercost: 4, energycost: 0 },
+    ],
+    effectsWhenHit: [
+        { effectType: 'spdrain', chance: 10, permanent: false, dn: 'SP Drained', spcost: 20, hpcost: 0, mpcost: 0, hungercost: 4, energycost: 0 },
+    ],
+    titles: ['haunt'],
+    aptitude: ['dark'],
+    blessings: [],
+    status: [],
+    regens: { sp: 1, hp: 1, mana: 1 },
+    monsSoul: 2,
+    race: "monster",
+    characterType: "enemy",
+    actionType: "chasing",
+    _isMoving: false,
+    _targetId: false as string | false,
+    _dirTarg: { x: 0, y: 0, z: 0 },
+    _attacking: false,
+    _canAttack: true,
+    _disabled: false, // skill.enemyBind - see index.ts's enemyBind handler
+    _cursed: false, // dark magic's curse - see index.ts's enemyCurse handler
+    weaponBlocking: false,
+    magicBlocking: false,
+    IsInVulnerable: false,
+    loots: [simpleCoreLoot],
+    // between slimeBase's 10s and monolithBase's 30s - a graveyard "elite",
+    // not a trash mob, but still a themed area meant to be farmed a bit
+    respawnDetails: {
+        willRespawn: true,
+        respawnTime: 20 * 1000,
+    },
+}
+
 function scatterPosition(areaType: string, half: number, minRadius: number, maxRadius: number) {
     let x: number, z: number
 
@@ -435,7 +532,10 @@ function scatterPosition(areaType: string, half: number, minRadius: number, maxR
             z = (Math.random() * 2 - 1) * half
         }
     } else {
-        // Non-village: spread anywhere across the map
+        // "square" (generateGhosts, below - scatter anywhere through the
+        // whole fenced graveyard plot rather than hugging its border the
+        // way "village" does) and any other/unrecognized areaType: spread
+        // anywhere within the square area centered on (centerX, centerZ).
         x = (Math.random() * 2 - 1) * half
         z = (Math.random() * 2 - 1) * half
     }
@@ -518,4 +618,14 @@ export function generateWisfDeer(total = 10, placeId = 1, areaSize = 300, areaTy
 
 export function generateLesserDemons(total = 1, placeId = 1, areaSize = 300, areaType = "fixed", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
     return generateEnemies(lesserDemonBase, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius)
+}
+
+// areaType defaults to "square" (not "village"/"ring"/"fixed" like every
+// generator above) - a graveyard is a small fenced square, not a radial
+// territory or a border band, so its own enemy should scatter through the
+// whole plot instead. Call with the graveyard's own position/areaSize
+// (localroomdb.js's graveYards entries, creations/creategraveyard.js's own
+// same areaSize convention) as centerX/centerZ/areaSize.
+export function generateGhosts(total = 5, placeId = 1, areaSize = 10, areaType = "square", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
+    return generateEnemies(ghostBase, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius)
 }

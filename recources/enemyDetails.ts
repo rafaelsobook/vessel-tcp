@@ -1,6 +1,7 @@
 import { randNumString } from "../tools/tools"
 import { simpleCoreLoot, mediumCoreLoot, waterslimeCoreLoot, fireslimeCoreLoot, electricslimeCoreLoot } from "./coreDetails"
-import { generateSlimes, generateFireSlimes, generateElectricSlimes, generateMonoliths, generateLesserDemons, generateDarkSlimes, generateForestDeer, generateJasferDeer, generateLuminaDeer, generateNightmareDeer, generateScorchDeer, generateWisfDeer } from "../generate-datas/genenemy"
+import { OPENWORLD_GRAVEYARDS, ghostsForGraveyard } from "./graveyards"
+import { generateSlimes, generateFireSlimes, generateElectricSlimes, generateMonoliths, generateLesserDemons, generateDarkSlimes, generateForestDeer, generateJasferDeer, generateLuminaDeer, generateNightmareDeer, generateScorchDeer, generateWisfDeer, generateGhosts } from "../generate-datas/genenemy"
 
 let monolithBodyHeight = 2
 
@@ -138,6 +139,18 @@ export default [
     ...OPENWORLD_ENEMY_BANDS.flatMap(band =>
         withTerritory(band.generator(band.count, 888, band.maxDist * 2, "ring", 0, 500, band.minDist, band.maxDist))
     ),
+    // graveyard ghosts (placeId 888, openworld) - one group per plot in
+    // graveyards.ts (the mirror of the client's constants/graveyards.js).
+    // 0.8x each plot's areaSize as the scatter square keeps every ghost
+    // comfortably inside creategraveyard.js's fence line instead of right
+    // on top of it. ghostsForGraveyard scales the count by plot area -
+    // sparse and elite, not one of the OPENWORLD_ENEMY_BANDS' trash-mob
+    // fields. The client only builds an openworld enemy within 300 units
+    // (worldsocket.js's OPENWORLD_ENEMY_CREATE_DIST), so ghosts at plots
+    // nobody is near cost nothing there.
+    ...OPENWORLD_GRAVEYARDS.flatMap(plot =>
+        generateGhosts(ghostsForGraveyard(plot.areaSize), 888, plot.areaSize * 0.8, "square", plot.position.x, plot.position.z)
+    ),
     // single lesserdemon - removed for now (was at (85, 585), ~120 units
     // from the true openworld center (0, 500), inside waterslime's own
     // 100-150 band - see git history/prior comment here for the full
@@ -263,6 +276,14 @@ export default [
     ...generateNightmareDeer(1, 1, 300, "fixed", 21.6, 130),
     ...generateScorchDeer(1, 1, 300, "fixed", 24.6, 130),
     ...generateWisfDeer(1, 1, 300, "fixed", 27.6, 130),
+    // graveyard ghosts (placeId 1, village) - localroomdb.js's graveYards
+    // entry for this place: position (55, 10), areaSize 10. Same 0.8x
+    // shrink-to-stay-inside-the-fence reasoning as the openworld graveyard
+    // ghosts above, just a much smaller plot - 2 ghosts, not this file's
+    // usual village trash-mob counts, since the whole fenced square is only
+    // 10x10 and already shares that space with creategraveyard.js's own
+    // rows of gravestones.
+    ...generateGhosts(2, 1, 8, "square", 55, 10),
     // {...enemyInterface,
     //     _id: `${randNumString()}`,
     //     x: 3.6,
