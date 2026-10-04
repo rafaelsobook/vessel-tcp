@@ -6,7 +6,7 @@ export const placesMD = [
 
     generateBSPDungeon({ 
     placeId: "dungeon101",
-    areaType: "dungeon",
+    // (no areaType - generateBSPDungeon always outputs "dungeon")
     seed: 12345,
     rockDensity: 0,
     gridWidth: 32,

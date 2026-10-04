@@ -1,15 +1,50 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.OPENWORLD_ENEMY_BANDS = exports.OPENWORLD_SLIME_TERRITORY = void 0;
 const tools_1 = require("../tools/tools");
 const coreDetails_1 = require("./coreDetails");
+const graveyards_1 = require("./graveyards");
 const genenemy_1 = require("../generate-datas/genenemy");
 let monolithBodyHeight = 2;
+// openworld (placeId 888) enemy territory - every enemy placed there (both
+// the static OPENWORLD_ENEMY_BANDS population below AND any index.ts spawns
+// dynamically topped up on top of them) carries this same object on
+// .territory, a shared reference rather than a fresh copy per enemy.
+// Centered on infterrain's own SPAWN_X/SPAWN_Z (0, 500) - same center every
+// band below is already scattered around. maxDist (2600) matches
+// OPENWORLD_ENEMY_BANDS' own outermost band (forestdeer, ...-2600) exactly -
+// see that table further down for the real per-type radius breakdown; kept
+// as its own separate constant here only because this whole object needs to
+// exist before withTerritory (right below) can reference it, and
+// withTerritory itself needs to exist before OPENWORLD_ENEMY_BANDS' own
+// static population uses it. Keep these two in sync if either end of the
+// outermost band ever changes.
+exports.OPENWORLD_SLIME_TERRITORY = { center: { x: 0, y: 0, z: 500 }, minDist: 0, maxDist: 2600 };
+// applies OPENWORLD_SLIME_TERRITORY to every enemy a generator call
+// produced - .map() instead of baking .territory into the shared
+// slimeBase/fireSlimeBase/electricSlimeBase templates themselves
+// (genenemy.ts), since those generators are generic/reusable for any
+// future placeId, not just this openworld population
+function withTerritory(enemies) {
+    return enemies.map(enem => ({ ...enem, territory: exports.OPENWORLD_SLIME_TERRITORY }));
+}
 const enemyInterface = {
     currentPlaceId: 1,
     _id: `${(0, tools_1.randNumString)()}`,
     encounterSound: false,
-    expToGain: 100,
-    bodyHeight: 1.8,
+    // reverted from a leftover TEMP DEBUG value (999999 - bumped way up to
+    // make a since-fixed "other player also gets exp" multiplayer bug easy
+    // to reproduce, never reverted after). The three live entries that
+    // spread this (waterslime/fireslime/electricslime below) all set their
+    // own real expToGain explicitly now anyway - this is just a sane
+    // fallback default for anything else built from enemyInterface without
+    // its own override, not a value anything currently actually relies on.
+    expToGain: 50,
+    // was 1.8 - unified to match genenemy.ts's own slimeBase (openworld
+    // waterslime/fireslime/electricslime), so the same-named slime is the
+    // same size everywhere instead of visibly taller in the village than
+    // in the open world
+    bodyHeight: 1,
     bodyWidenes: .9,
     origPos: { x: 3.6, y: 0, z: 130 },
     effects: [
@@ -33,23 +68,87 @@ const enemyInterface = {
     _dirTarg: { x: 0, y: 0, z: 0 },
     _attacking: false,
     _canAttack: true, // If stunned turn to false
+    _disabled: false, // skill.enemyBind - see index.ts's enemyBind handler
+    _cursed: false, // dark magic's curse - see index.ts's enemyCurse handler
+    weaponBlocking: false,
+    magicBlocking: false,
+    IsInVulnerable: false,
     loots: [coreDetails_1.simpleCoreLoot],
+    // 10s - matching slimeBase's own respawnTime (genenemy.ts) now, so
+    // village and openworld slimes respawn at the same rate instead of
+    // this being 5s while openworld's own slimeBase was 15s for no
+    // particular reason
     respawnDetails: {
         willRespawn: true,
-        respawnTime: 5 * 1000,
+        respawnTime: 10 * 1000,
     }
 };
+// --- OPENWORLD (placeId 888) RADIAL BANDING ---
+// Single source of truth for "how far from center does each enemy type
+// spawn," centered on OPENWORLD_SLIME_TERRITORY's own (0, 500) (infterrain's
+// SPAWN_X/SPAWN_Z, also the player's own openworld spawn point). Ordered
+// nearest-to-farthest, matching the intended difficulty progression a
+// player walking straight out from spawn should actually encounter:
+// waterslime -> fireslime -> electricslime -> orangelith -> darkslime ->
+// forestdeer. Bands are contiguous and non-overlapping by construction (each
+// one's minDist is the previous one's maxDist) - keep them that way when
+// tuning, or two types end up sharing ground again.
+//
+// Used for BOTH the static population below (one flatMap instead of six
+// hand-typed withTerritory(generateX(...)) calls that could silently drift
+// out of sync with each other - which is exactly what had happened here:
+// the six calls used to be typed in a completely different order than their
+// own radius numbers actually put them in, so reading the file top-to-bottom
+// never matched what a player walking outward actually ran into) AND
+// index.ts's own dynamic top-up interval, which used to pick a generator
+// UNIFORMLY AT RANDOM across all five types regardless of the player's
+// actual distance from center - see that file's own comment on
+// OPENWORLD_ENEMY_BANDS for the full "why" this was the real bug behind
+// seeing the wrong monsters near spawn. The static rings below were always
+// correctly banded; the dynamic top-up that keeps the world populated as
+// players roam/kill things was not, and it runs far more often (every 500ms,
+// per player) than the one-time static build.
+//
+// areaSize (unused by "ring" scatter itself, kept only because
+// generateEnemies' own signature still takes one) is derived here as
+// maxDist*2, same "roughly 2x maxRadius" convention this file's own
+// generator calls always used by hand.
+exports.OPENWORLD_ENEMY_BANDS = [
+    { generator: genenemy_1.generateSlimes, name: "waterslime", count: 15, minDist: 100, maxDist: 150 },
+    { generator: genenemy_1.generateFireSlimes, name: "fireslime", count: 50, minDist: 150, maxDist: 450 },
+    { generator: genenemy_1.generateElectricSlimes, name: "electricslime", count: 50, minDist: 450, maxDist: 850 },
+    { generator: genenemy_1.generateMonoliths, name: "orangelith", count: 5, minDist: 850, maxDist: 950 },
+    { generator: genenemy_1.generateDarkSlimes, name: "darkslime", count: 50, minDist: 950, maxDist: 2000 },
+    { generator: genenemy_1.generateForestDeer, name: "forestdeer", count: 10, minDist: 2000, maxDist: 2600 },
+];
 exports.default = [
-    // ...generateSlimes(20),
-    // openworld (placeId 888) - centered on infterrain's own SPAWN_X/SPAWN_Z (0, 500),
-    // not world origin, since that's where the actual playable terrain/player spawn is
-    // ...generateSlimes(10, 888, 300, "ring", 0, 500),
-    // ring surrounding the openworld cluster - scattered 100-150 units out from (0, 500)
-    ...(0, genenemy_1.generateSlimes)(15, 888, 300, "ring", 0, 500, 100, 150),
-    // orangelith monoliths - further out than the slime ring, ~200 units from (0, 500)
-    ...(0, genenemy_1.generateMonoliths)(5, 888, 300, "ring", 0, 500, 200, 260),
-    // single lesserdemon at the openworld center
-    ...(0, genenemy_1.generateLesserDemons)(1, 888, 300, "fixed", -34, 70),
+    // openworld (placeId 888) - the six bands above, in the exact same
+    // nearest-to-farthest order they're declared in (see that table's own
+    // header comment). 50/50/50 for the three common trash-mob bands (down
+    // from an initial 250/250 - static population is deliberately sparse
+    // now, index.ts's own dynamic top-up interval tops territory up near
+    // whichever players are actually out there instead of pre-building the
+    // whole area upfront - see client/src/sockets/renderer.js's own
+    // OPENWORLD_PLACE_ID distance-based mesh hiding for how the client keeps
+    // this affordable regardless of how many end up alive at once), 5/10 for
+    // the two rarer/tougher single-type bands (orangelith/forestdeer).
+    ...exports.OPENWORLD_ENEMY_BANDS.flatMap(band => withTerritory(band.generator(band.count, 888, band.maxDist * 2, "ring", 0, 500, band.minDist, band.maxDist))),
+    // graveyard ghosts (placeId 888, openworld) - one group per plot in
+    // graveyards.ts (the mirror of the client's constants/graveyards.js).
+    // 0.8x each plot's areaSize as the scatter square keeps every ghost
+    // comfortably inside creategraveyard.js's fence line instead of right
+    // on top of it. ghostsForGraveyard scales the count by plot area -
+    // sparse and elite, not one of the OPENWORLD_ENEMY_BANDS' trash-mob
+    // fields. The client only builds an openworld enemy within 300 units
+    // (worldsocket.js's OPENWORLD_ENEMY_CREATE_DIST), so ghosts at plots
+    // nobody is near cost nothing there.
+    ...graveyards_1.OPENWORLD_GRAVEYARDS.flatMap(plot => (0, genenemy_1.generateGhosts)((0, graveyards_1.ghostsForGraveyard)(plot.areaSize), 888, plot.areaSize * 0.8, "square", plot.position.x, plot.position.z)),
+    // single lesserdemon - removed for now (was at (85, 585), ~120 units
+    // from the true openworld center (0, 500), inside waterslime's own
+    // 100-150 band - see git history/prior comment here for the full
+    // "was (-34, 70), nowhere near center" fix this position itself was).
+    // Re-add with `...generateLesserDemons(1, 888, 300, "fixed", 85, 585),`
+    // if/when this comes back.
     { ...enemyInterface,
         _id: `${(0, tools_1.randNumString)()}`,
         maxDistance: 0.5,
@@ -60,6 +159,7 @@ exports.default = [
         dn: "Slime",
         modelStyle: "slime",
         elementType: "water",
+        aptitude: ['water'],
         stats: {
             dmg: 5,
             magDmg: 1,
@@ -71,8 +171,111 @@ exports.default = [
         lvl: 1,
         hp: 580,
         maxHp: 580,
+        loots: [coreDetails_1.waterslimeCoreLoot],
+        // own explicit value now, not enemyInterface's shared 999999 debug
+        // leftover - weakest slime variant, so the smallest exp
+        expToGain: 50,
         // deathSound: "slimedeath",
     },
+    // fireslime/electricslime - same spot/stats as the waterslime above,
+    // just spaced a few units apart along x (3.6/6.6/9.6) so all three spawn
+    // side by side instead of overlapping, placeId 1 (village) - see
+    // enemyInterface's own currentPlaceId. Client-side, modelStyle "slime"
+    // reuses the exact same slime.glb as waterslime (see client/src/enemies/
+    // createEnemy.js), and elementType now actually picks the material's
+    // color too (SLIME_ELEMENT_COLORS in skins.js - orange-red for fire,
+    // yellow for electric, the original green for water/anything else).
+    { ...enemyInterface,
+        _id: `${(0, tools_1.randNumString)()}`,
+        maxDistance: 0.5,
+        x: 6.6,
+        y: 0,
+        z: 130,
+        name: "fireslime",
+        dn: "Fire Slime",
+        modelStyle: "slime",
+        elementType: "fire",
+        aptitude: ['fire'],
+        // Elite Skill (skillrank 1) matching its element - see createEnemy.js's
+        // enemy skill-casting setInterval (SKILLS_BY_NAME resolves this name
+        // to the real skill object client-side)
+        skills: ['flamebrand'],
+        // see createEnemy.js's own dodge-detection interval
+        canDodge: true,
+        stats: {
+            dmg: 5,
+            magDmg: 1,
+            spd: 3.3,
+            atkSpd: 2,
+            accuracy: 1,
+            critical: 1.4,
+        },
+        lvl: 1,
+        hp: 580,
+        maxHp: 580,
+        loots: [coreDetails_1.fireslimeCoreLoot],
+        expToGain: 200,
+        // deathSound: "slimedeath",
+    },
+    { ...enemyInterface,
+        _id: `${(0, tools_1.randNumString)()}`,
+        maxDistance: 0.5,
+        x: 9.6,
+        y: 0,
+        z: 130,
+        name: "electricslime",
+        dn: "Electric Slime",
+        modelStyle: "slime",
+        // "lightning" not "electric" - matches the game's own established
+        // element vocabulary (see npcDetails.js's crystal NPC dialogue:
+        // "Fire, water, wind, earth, lightning, light, dark...") and every
+        // other aptitude entry in this codebase, none of which ever use
+        // "electric"
+        elementType: "lightning",
+        aptitude: ['lightning'],
+        // Elite Skill (skillrank 1) matching its element - see
+        // client/src/staticRecources/skillsData.js's lightningboltSkill
+        skills: ['lightningbolt'],
+        // see createEnemy.js's own dodge-detection interval
+        canDodge: true,
+        stats: {
+            dmg: 5,
+            magDmg: 1,
+            spd: 3.3,
+            atkSpd: 2,
+            accuracy: 1,
+            critical: 1.4,
+        },
+        lvl: 1,
+        hp: 580,
+        maxHp: 580,
+        loots: [coreDetails_1.electricslimeCoreLoot],
+        expToGain: 500,
+        // deathSound: "slimedeath",
+    },
+    // one of each deer texture variant, village (placeId 1) - "fixed"
+    // areaType lands each exactly at (centerX, centerZ) with no scatter,
+    // same pattern generateLesserDemons(1, 888, ...) uses for its own single
+    // openworld spawn. Continues the waterslime/fireslime/electricslime row
+    // above (3.6/6.6/9.6 along x) in the same 3-unit spacing, purely so all
+    // 6 are lined up and easy to walk down and look at - genenemy.ts's own
+    // jasferDeer/luminaDeer/nightmareDeer/scorchDeer/wisfDeer bases already
+    // carry their own real stats/loot/effects (recolors of forestDeer), no
+    // need to redeclare them here.
+    ...(0, genenemy_1.generateForestDeer)(1, 1, 300, "fixed", 12.6, 130),
+    ...(0, genenemy_1.generateJasferDeer)(1, 1, 300, "fixed", 15.6, 130),
+    ...(0, genenemy_1.generateLuminaDeer)(1, 1, 300, "fixed", 18.6, 130),
+    ...(0, genenemy_1.generateNightmareDeer)(1, 1, 300, "fixed", 21.6, 130),
+    ...(0, genenemy_1.generateScorchDeer)(1, 1, 300, "fixed", 24.6, 130),
+    ...(0, genenemy_1.generateWisfDeer)(1, 1, 300, "fixed", 27.6, 130),
+    // graveyard ghosts (placeId 1, village) - localroomdb.js's graveYards
+    // entry for this place: position (55, 10), areaSize 10. Same 0.8x
+    // shrink-to-stay-inside-the-fence reasoning as the openworld graveyard
+    // ghosts above, just a much smaller plot - 2 ghosts, not this file's
+    // usual village trash-mob counts, since the whole fenced square is only
+    // 10x10 and already shares that space with creategraveyard.js's own
+    // rows of gravestones.
+    ...(0, genenemy_1.generateGhosts)(2, 1, 8, "square", 55, 10),
     // {...enemyInterface,
     //     _id: `${randNumString()}`,
     //     x: 3.6,

@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.mediumCoreLoot = exports.simpleCoreLoot = void 0;
+exports.mediumCoreLoot = exports.darkslimeCoreLoot = exports.electricslimeCoreLoot = exports.fireslimeCoreLoot = exports.waterslimeCoreLoot = exports.simpleCoreLoot = void 0;
 const tools_1 = require("../tools/tools");
 exports.simpleCoreLoot = {
     itemId: (0, tools_1.randNumString)(),
@@ -17,6 +17,74 @@ exports.simpleCoreLoot = {
     price: { coinType: "bronze", pieces: 50 },
     qnty: 1,
     desc: "core that can be found on almost any small monsters, can be useful for enhancing items",
+    rarity: "normal"
+};
+exports.waterslimeCoreLoot = {
+    itemId: (0, tools_1.randNumString)(),
+    name: "waterslimecore",
+    dn: "water slime core",
+    itemCateg: "crafting",
+    itemType: "core",
+    weaponType: false,
+    equipAbilities: {
+        dmg: 10, def: 10, magicDmg: 10, plusStr: 0, plusDex: 0, plusInt: 0,
+        plusDurability: 30
+    },
+    equiped: false,
+    price: { coinType: "bronze", pieces: 50 },
+    qnty: 1,
+    desc: "a gelatinous core taken from a water slime, useful for enhancing items",
+    rarity: "normal"
+};
+exports.fireslimeCoreLoot = {
+    itemId: (0, tools_1.randNumString)(),
+    name: "fireslimecore",
+    dn: "fire slime core",
+    itemCateg: "crafting",
+    itemType: "core",
+    weaponType: false,
+    equipAbilities: {
+        dmg: 10, def: 10, magicDmg: 10, plusStr: 0, plusDex: 0, plusInt: 0,
+        plusDurability: 30
+    },
+    equiped: false,
+    price: { coinType: "bronze", pieces: 50 },
+    qnty: 1,
+    desc: "a smoldering core taken from a fire slime, useful for enhancing items",
+    rarity: "normal"
+};
+exports.electricslimeCoreLoot = {
+    itemId: (0, tools_1.randNumString)(),
+    name: "electricslimecore",
+    dn: "electric slime core",
+    itemCateg: "crafting",
+    itemType: "core",
+    weaponType: false,
+    equipAbilities: {
+        dmg: 10, def: 10, magicDmg: 10, plusStr: 0, plusDex: 0, plusInt: 0,
+        plusDurability: 30
+    },
+    equiped: false,
+    price: { coinType: "bronze", pieces: 50 },
+    qnty: 1,
+    desc: "a crackling core taken from an electric slime, useful for enhancing items",
+    rarity: "normal"
+};
+exports.darkslimeCoreLoot = {
+    itemId: (0, tools_1.randNumString)(),
+    name: "darkslimecore",
+    dn: "dark slime core",
+    itemCateg: "crafting",
+    itemType: "core",
+    weaponType: false,
+    equipAbilities: {
+        dmg: 10, def: 10, magicDmg: 10, plusStr: 0, plusDex: 0, plusInt: 0,
+        plusDurability: 30
+    },
+    equiped: false,
+    price: { coinType: "bronze", pieces: 50 },
+    qnty: 1,
+    desc: "a shadow-wreathed core taken from a dark slime, useful for enhancing items",
     rarity: "normal"
 };
 exports.mediumCoreLoot = {

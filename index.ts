@@ -6,6 +6,7 @@ import { randNumString, randNum } from "./tools/tools"
 
 import { placesMD } from "./placedetails/places"
 import enemyArray, { OPENWORLD_SLIME_TERRITORY, OPENWORLD_ENEMY_BANDS } from "./recources/enemyDetails"
+import { dungeonWanderTarget } from "./recources/enemiesInDungeon"
 import startingQuests, { createSlaySlimesQuest, F_RANK_QUEST_COUNT } from "./recources/quests"
 import { generateSlimes, generateFireSlimes, generateElectricSlimes, generateMonoliths, generateDarkSlimes, generateLesserDemons } from "./generate-datas/genenemy"
 import { startingTreasures } from "./recources/treasures"
@@ -13,6 +14,7 @@ import { startingGrains, Tgrain } from "./recources/grains"
 import { Brain, ATTITUDE_PRESETS, RESTING_Y } from "./recources/npcBrain"
 import { rollBotLevelReward, botTypeFor, botDamageAfterArmor } from "./recources/botItems"
 import { getWeather, getWeatherState, rollWeather, setWeather, WEATHER_ROLL_INTERVAL_MS } from "./recources/weather"
+import { getDayNightState, setTimeOfDay, DAY_NIGHT_SYNC_INTERVAL_MS } from "./recources/dayNight"
 import { faker } from "@faker-js/faker"
 
 export const enemyLengthsInPlace = [
@@ -618,7 +620,8 @@ io.on("connection", (socket: Socket) => {
         io.emit("userJoined", { currentPlaceId: data.currentPlace.placeId, newPlayerName: data.name,
             players, placesMD, tcpEnemies, quests,
             treasures, bonfires, trunks, grains, struckWeapons,
-            weather: getWeatherState()
+            weather: getWeatherState(),
+            dayNight: getDayNightState()
         }) // always send the updated players count
     })
 
@@ -639,6 +642,16 @@ io.on("connection", (socket: Socket) => {
         if(!applied) return log(`[weather] ignored unknown weather "${data?.weather}"`)
         log(`[weather] forced -> ${applied}`)
         io.emit("weather-changed", getWeatherState())
+    })
+
+    // debug/admin override for the world clock (recources/dayNight.ts) -
+    // jumps every client to the same timeOfDay (0 midnight .. 0.5 noon), same
+    // whole-world scope as "set-weather" just above
+    safeOn(socket, "set-time-of-day", (data) => {
+        const applied = setTimeOfDay(data?.timeOfDay)
+        if(applied === null) return log(`[daynight] ignored invalid timeOfDay "${data?.timeOfDay}"`)
+        log(`[daynight] forced -> ${applied.toFixed(3)}`)
+        io.emit("daynight-sync", getDayNightState())
     })
 
     safeOn(socket, "toggle-spawn-bots", () => {
@@ -1400,11 +1413,15 @@ setInterval(() => {
         // wandering stays anchored to its own territory instead of
         // drifting further and further from where it was placed over
         // successive wander ticks
+        // inside a dungeon the target has to respect its walls - see
+        // enemiesInDungeon.ts (null: nowhere reachable this tick, stay put)
+        const dungeonDest = dungeonWanderTarget(enem, WANDER_RADIUS)
+        if(dungeonDest === null) return
         const origin = enem.origPos ?? { x: enem.x, z: enem.z }
         const angle = Math.random() * Math.PI * 2
         const radius = Math.random() * WANDER_RADIUS
-        const destX = origin.x + Math.cos(angle) * radius
-        const destZ = origin.z + Math.sin(angle) * radius
+        const destX = dungeonDest ? dungeonDest.x : origin.x + Math.cos(angle) * radius
+        const destZ = dungeonDest ? dungeonDest.z : origin.z + Math.sin(angle) * radius
 
         // every OTHER position-changing event in this file (enemyWillAttack
         // etc.) writes its new x/z straight onto the tcpEnemies entry right
@@ -2638,7 +2655,8 @@ function spawnBot(overrides?: { attitudeName?: string, pos?: { x: number, z: num
         currentPlaceId: botPlayer.currentPlace.placeId, newPlayerName: botPlayer.name, isBot: true,
         players, placesMD, tcpEnemies, quests,
         treasures, bonfires, trunks, grains, struckWeapons,
-        weather: getWeatherState()
+        weather: getWeatherState(),
+        dayNight: getDayNightState()
     })
 }
 
@@ -2657,6 +2675,12 @@ setInterval(() => {
     log(`[weather] rolled -> ${rolled}`)
     io.emit("weather-changed", getWeatherState())
 }, WEATHER_ROLL_INTERVAL_MS)
+
+// World clock resync (recources/dayNight.ts). Clients advance the time of day
+// on their own clocks between these - this only pulls any drift back in line.
+setInterval(() => {
+    io.emit("daynight-sync", getDayNightState())
+}, DAY_NIGHT_SYNC_INTERVAL_MS)
 
 // pushes each live bot's own place's latest obstaclesByPlace snapshot into
 // its Brain - a bit slower than botSensor.js's own 4s report cadence, no

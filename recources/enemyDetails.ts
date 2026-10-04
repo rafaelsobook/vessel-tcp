@@ -1,6 +1,7 @@
 import { randNumString } from "../tools/tools"
 import { simpleCoreLoot, mediumCoreLoot, waterslimeCoreLoot, fireslimeCoreLoot, electricslimeCoreLoot } from "./coreDetails"
 import { OPENWORLD_GRAVEYARDS, ghostsForGraveyard } from "./graveyards"
+import { DUNGEON_ENEMIES } from "./enemiesInDungeon"
 import { generateSlimes, generateFireSlimes, generateElectricSlimes, generateMonoliths, generateLesserDemons, generateDarkSlimes, generateForestDeer, generateJasferDeer, generateLuminaDeer, generateNightmareDeer, generateScorchDeer, generateWisfDeer, generateGhosts } from "../generate-datas/genenemy"
 
 let monolithBodyHeight = 2
@@ -284,6 +285,9 @@ export default [
     // 10x10 and already shares that space with creategraveyard.js's own
     // rows of gravestones.
     ...generateGhosts(2, 1, 8, "square", 55, 10),
+    // procedural dungeons (placeId 12) - ghosts through the rooms, a lesser
+    // demon boss on the dais; placement lives in enemiesInDungeon.ts
+    ...DUNGEON_ENEMIES,
     // {...enemyInterface,
     //     _id: `${randNumString()}`,
     //     x: 3.6,

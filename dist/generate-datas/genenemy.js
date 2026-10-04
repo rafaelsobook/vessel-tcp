@@ -1,8 +1,18 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.generateSlimes = generateSlimes;
+exports.generateFireSlimes = generateFireSlimes;
+exports.generateElectricSlimes = generateElectricSlimes;
+exports.generateDarkSlimes = generateDarkSlimes;
 exports.generateMonoliths = generateMonoliths;
+exports.generateForestDeer = generateForestDeer;
+exports.generateJasferDeer = generateJasferDeer;
+exports.generateLuminaDeer = generateLuminaDeer;
+exports.generateNightmareDeer = generateNightmareDeer;
+exports.generateScorchDeer = generateScorchDeer;
+exports.generateWisfDeer = generateWisfDeer;
 exports.generateLesserDemons = generateLesserDemons;
+exports.generateGhosts = generateGhosts;
 const tools_1 = require("../tools/tools");
 const coreDetails_1 = require("../recources/coreDetails");
 const slimeBase = {
@@ -14,16 +24,23 @@ const slimeBase = {
     stats: {
         dmg: 5,
         magDmg: 1,
-        spd: 5.3,
+        spd: 2.5,
         atkSpd: 2,
         accuracy: 1,
         critical: 1.4,
     },
     lvl: 1,
-    hp: 580,
-    maxHp: 580,
-    expToGain: 100,
-    bodyHeight: 1,
+    hp: 1000,
+    maxHp: 1000,
+    // reverted from a leftover TEMP DEBUG value (999999 - bumped way up to
+    // make a since-fixed "other player also gets exp" multiplayer bug easy
+    // to reproduce, never reverted after). This is waterslime's OWN real
+    // value now - the weakest slime variant, so the smallest exp - not just
+    // a shared fallback: fireSlimeBase/electricSlimeBase/darkSlimeBase below
+    // all override this explicitly with their own higher amount instead of
+    // inheriting it.
+    expToGain: 50,
+    bodyHeight: 1.15,
     bodyWidenes: 0.9,
     effects: [
         { effectType: 'spdrain', chance: 10, permanent: false, dn: 'SP Drained', spcost: 20, hpcost: 0, mpcost: 0, hungercost: 4, energycost: 0 },
@@ -32,7 +49,16 @@ const slimeBase = {
         { effectType: 'spdrain', chance: 10, permanent: false, dn: 'SP Drained', spcost: 20, hpcost: 0, mpcost: 0, hungercost: 4, energycost: 0 },
     ],
     titles: ['slime'],
-    skills: [],
+    // tidalspikeSkill (client/src/staticRecources/skillsData.js) - element
+    // "water", skillrank:1 ("Elite Skill"), same tier/stat shape
+    // fireSlimeBase's own flamebrand and electricSlimeBase's own
+    // lightningbolt already sit at (castDuration:2, skillCoolDown:1500, mp
+    // demand:15, plusDmg:70) - waterslime was the only one of the four
+    // slime variants with no skill at all until now. canDodge:true to match
+    // (client/src/enemies/createEnemy.js's own dodge-detection interval
+    // gates on this flag, same as the other three).
+    skills: ['tidalspike'],
+    canDodge: true,
     aptitude: ['water'],
     blessings: [],
     status: [],
@@ -46,29 +72,133 @@ const slimeBase = {
     _dirTarg: { x: 0, y: 0, z: 0 },
     _attacking: false,
     _canAttack: true,
-    loots: [coreDetails_1.simpleCoreLoot],
+    _disabled: false, // skill.enemyBind - see index.ts's enemyBind handler
+    _cursed: false, // dark magic's curse - see index.ts's enemyCurse handler
+    weaponBlocking: false,
+    magicBlocking: false,
+    IsInVulnerable: false,
+    loots: [coreDetails_1.waterslimeCoreLoot],
+    // 10s - matching enemyInterface's own respawnTime (enemyDetails.ts) now,
+    // so village and openworld slimes respawn at the same rate instead of
+    // this being 15s while the village ones were 5s for no particular reason
     respawnDetails: {
         willRespawn: true,
-        respawnTime: 15 * 1000,
+        respawnTime: 10 * 1000,
     },
 };
+// fire/electric variants of slimeBase - same body/stats template, just the
+// element/loot/skill swapped in, same pattern enemyDetails.ts's own
+// standalone fireslime/electricslime entries (village, placeId 1) already
+// use: skills: [elementSkill] (createEnemy.js's enemy skill-casting
+// interval resolves this name to the real skill object client-side via
+// SKILLS_BY_NAME) and canDodge: true (createEnemy.js's own dodge-detection
+// interval). Both still spread via generateEnemies/scatterPosition exactly
+// like generateSlimes does - only the base template differs.
+const fireSlimeBase = {
+    ...slimeBase,
+    name: "fireslime",
+    dn: "Fire Slime",
+    elementType: "fire",
+    titles: ['fire slime'],
+    aptitude: ['fire'],
+    skills: ['flamebrand'],
+    canDodge: true,
+    loots: [coreDetails_1.fireslimeCoreLoot],
+    expToGain: 200,
+    hp: 2500,
+    maxHp: 2500,
+};
+const electricSlimeBase = {
+    ...slimeBase,
+    name: "electricslime",
+    dn: "Electric Slime",
+    // "lightning" not "electric" - matches the game's own established
+    // element vocabulary, same reasoning as enemyDetails.ts's own
+    // standalone electricslime entry
+    elementType: "lightning",
+    titles: ['electric slime'],
+    aptitude: ['lightning'],
+    skills: ['lightningbolt'],
+    canDodge: true,
+    loots: [coreDetails_1.electricslimeCoreLoot],
+    expToGain: 500,
+    hp: 3000,
+    maxHp: 3000,
+};
+// darkslime - the enemy filling OPENWORLD_SLIME_TERRITORY's far edge (past
+// electricslime's own 600-1000 band, see enemyDetails.ts's withTerritory
+// call for this one), so it's deliberately built as the toughest of the
+// slime family rather than just another same-strength recolor: real stat
+// bumps on top of slimeBase's own (lvl 1/hp 2580/dmg 5), not just a palette
+// swap. shadowbolt (skillsData.js - element: "dark") already exists and is
+// already enemy-usable (lesserDemonBase above casts it too), so reused
+// as-is instead of inventing a new skill. elementType: "dark" resolves to
+// the purple/black palette added in client/src/enemies/skins.js.
+const darkSlimeBase = {
+    ...slimeBase,
+    name: "darkslime",
+    dn: "Dark Slime",
+    elementType: "dark",
+    stats: {
+        dmg: 10,
+        magDmg: 10,
+        spd: 3.5,
+        atkSpd: 3,
+        accuracy: 1.2,
+        critical: 1.5,
+    },
+    lvl: 5,
+    hp: 4200,
+    maxHp: 4200,
+    // bodyHeight/bodyWidenes intentionally NOT overridden here anymore -
+    // used to be bigger (1.3/1.1) than slimeBase's own 1/0.9 to read as
+    // visibly heftier at a glance, matching its higher stats, but all four
+    // slime types are unified to the same size now - "toughest of the
+    // family" is still true (stats above), just not telegraphed by size
+    titles: ['dark slime'],
+    aptitude: ['dark'],
+    skills: ['shadowbolt'],
+    canDodge: true,
+    loots: [coreDetails_1.darkslimeCoreLoot],
+    expToGain: 2000,
+};
 const monolithBase = {
-    maxDistance: 4.5,
+    // was 4.5 - way past melee reach (renderer.js's chase loop stops
+    // advancing once dist < maxDistance, and createEnemy.js's attack()
+    // uses the same field for its own range check), so it stopped and
+    // "attacked" from 4.5 units out with nothing ever visually connecting.
+    // rangeAtkDetails below (range: 15) suggests 4.5 was actually tuned for
+    // a ranged sting attack, but the code that would use rangeAtkDetails is
+    // commented out in createEnemy.js and actionType here is "chasing" not
+    // "dynamic"/"throwing" - it never fires, so this was silently running
+    // melee-only this whole time. 0.7 is a real melee reach, roughly
+    // matching slimeBase's own maxDistance-to-bodyWidenes ratio (0.5/0.9)
+    // with a little extra for this enemy's taller frame (bodyHeight 2).
+    maxDistance: 0.7,
+    elementType: "earth",
     name: "orangelith",
     dn: "Orange Lith",
     modelStyle: "monolith",
+    // see client/src/enemies/createEnemy.js's own dodge-detection interval
+    canDodge: true,
+    // was dmg:2/magDmg:1/accuracy:1/critical:1.4 - identical to or actually
+    // LOWER than slimeBase's own dmg:5 despite monolith being lvl 10 vs
+    // slime's lvl 1 and having 5700 hp vs 2580. Bumped so monolith is
+    // genuinely tougher than electricSlimeBase (which spreads slimeBase's
+    // stats unchanged) in melee dmg/magDmg/accuracy/critical too, not just
+    // hp/spd/atkSpd.
     stats: {
-        dmg: 2,
-        magDmg: 1,
+        dmg: 12,
+        magDmg: 4,
         spd: 7,
         atkSpd: 2.9,
-        accuracy: 1,
-        critical: 1.4,
+        accuracy: 1.3,
+        critical: 1.6,
     },
     lvl: 10,
     hp: 5700,
     maxHp: 5700,
-    expToGain: 240,
+    expToGain: 600,
     bodyHeight: 2,
     bodyWidenes: 1.1,
     actionType: "chasing",
@@ -76,11 +206,16 @@ const monolithBase = {
     deathSound: "beeS",
     encounterSound: "beeS",
     effects: [
-        { effectType: 'poisoned', chance: 10, permanent: true, dn: 'Venom Extracted', spcost: 20, hpcost: 10, mpcost: 0, hungercost: 4, energycost: 0 },
+        { effectType: 'poisoned', chance: 10, permanent: true, dn: 'Venom Extracted', spcost: 20, hpcost: 10, mpcost: 0, hungercost: 4, energycost: 0, soundPlayPerDmg: 'dmgpm' },
     ],
     effectsWhenHit: [],
     titles: ['stinger'],
-    skills: [],
+    // stoneshard (skillsData.js - earth, projectileStyle "blade", same
+    // safe-for-enemies style flamebrand/lightningbolt already use) -
+    // resolved client-side via SKILLS_BY_NAME, same generic det.skills-
+    // driven casting interval fireslime/electricslime already use
+    // (createEnemy.js)
+    skills: ['stoneshard'],
     aptitude: ['poison'],
     blessings: [],
     status: [],
@@ -93,14 +228,112 @@ const monolithBase = {
     _dirTarg: { x: 0, y: 0, z: 0 },
     _attacking: false,
     _canAttack: true,
+    _disabled: false, // skill.enemyBind - see index.ts's enemyBind handler
+    _cursed: false, // dark magic's curse - see index.ts's enemyCurse handler
+    weaponBlocking: false,
+    magicBlocking: false,
+    IsInVulnerable: false,
     loots: [coreDetails_1.simpleCoreLoot],
     respawnDetails: {
         willRespawn: true,
         respawnTime: 30 * 1000,
     },
 };
+// forestdeer - modelStyle "deer" (models/monsters/deer.glb, already on disk,
+// with real idle1/walking/running1/attack1/death clips - confirmed by
+// grepping the glb's own text, not assumed) needs its own loadMonsterRoot
+// call + switch case wired in client-side (containers.js/worldsocket.js/
+// createEnemy.js) before this actually renders, same as every other
+// modelStyle here. Also still needs a real body texture at
+// images/textures/enemy/deer/forestdeer.jpg (createMonsterMaterial's own
+// path convention, see monolith/goblin's existing texture folders) - not
+// something this file can provide.
+//
+// deerBase (spread in below) is kept as its own object rather than inlined
+// - stats.walkSpd is the one field here that's genuinely new (no other
+// enemy base has it): renderer.js's own wander/roam movement branch reads
+// it to move at a slower pace and play the real "walking" clip above while
+// idly roaming, instead of always sprinting everywhere on "running" the way
+// every walkSpd-less enemy (slime/monolith/lesserdemon) still does.
+const deerBase = {
+    canDodge: true,
+    elementType: "none",
+    // elemental weakness (client's creations/skillEffects.js's own
+    // getElementDamageMultiplier reads this off det.weakness) - a player
+    // skill whose own element matches this deals bonus damage. Not the
+    // same field as elementType above (that one's purely cosmetic - which
+    // SLIME_ELEMENT_COLORS palette a slime's shared material uses,
+    // client's enemies/skins.js - deer don't even use that material).
+    weakness: "fire",
+    maxDistance: 0.7,
+    modelStyle: "deer",
+    stats: {
+        dmg: 40,
+        magDmg: 4,
+        spd: 8,
+        walkSpd: 3,
+        atkSpd: 5,
+        accuracy: 1.3,
+        critical: 1.6,
+    },
+    effects: [
+    // { effectType: 'poisoned', chance: 10, permanent: true, dn: 'Venom Extracted', spcost: 20, hpcost: 10, mpcost: 0, hungercost: 4, energycost: 0, soundPlayPerDmg: 'dmgpm' },
+    ],
+};
+const forestDeer = {
+    ...deerBase,
+    name: "forestdeer",
+    dn: "Forest Deer",
+    lvl: 20,
+    hp: 5700,
+    maxHp: 5700,
+    expToGain: 1000,
+    bodyHeight: 3,
+    bodyWidenes: 1.1,
+    actionType: "chasing",
+    effectsWhenHit: [],
+    skills: [],
+    blessings: [],
+    status: [],
+    regens: { sp: 1, hp: 1, mana: 1 },
+    monsSoul: 2,
+    race: "monster",
+    characterType: "enemy",
+    weaponBlocking: false,
+    magicBlocking: false,
+    IsInVulnerable: false,
+    // required - createEnemy.js's own death handler does `loots.length` with
+    // no guard, so an enemy base missing this crashes the client on death.
+    // simpleCoreLoot, not mediumCoreLoot, to match its lvl/hp tier (monolith
+    // lvl10/hp5700 and lesserdemon lvl30/hp12000 both use simpleCoreLoot too -
+    // mediumCoreLoot is reserved for woodbane, a much bigger hp26700 enemy)
+    loots: [coreDetails_1.simpleCoreLoot],
+    respawnDetails: {
+        willRespawn: true,
+        respawnTime: 30 * 1000,
+    },
+};
+// jasfer/lumina/nightmare/scorch/wisf - pure texture recolors of forestDeer
+// (images/textures/enemy/deer/<name>.jpg, all 6 already on disk, confirmed).
+// Same modelStyle "deer" (one shared deer.glb), same combat stats/loot/
+// effects as forestDeer - only name/dn differ, since that's what
+// createMonsterMaterial's own ${modelStyle}/${name}.jpg path convention
+// keys its texture lookup on. Not elementally distinct yet (no
+// aptitude/skill changes) - can be split apart the same way
+// fireSlimeBase/electricSlimeBase diverge from slimeBase if these are
+// meant to play differently later, not just look different.
+const jasferDeer = { ...forestDeer, elementType: "none", name: "jasferdeer", dn: "Jasfer Deer" };
+const luminaDeer = { ...forestDeer, elementType: "none", name: "luminadeer", dn: "Lumina Deer" };
+const nightmareDeer = { ...forestDeer, elementType: "none", name: "nightmaredeer", dn: "Nightmare Deer" };
+const scorchDeer = { ...forestDeer, elementType: "none", name: "scorchdeer", dn: "Scorch Deer" };
+const wisfDeer = { ...forestDeer, elementType: "none", name: "wisfdeer", dn: "Wisf Deer" };
 const lesserDemonBase = {
-    maxDistance: 7.5,
+    // was 7.5, same "stops and swings from way too far away" issue as
+    // monolithBase above - this one has no rangeAtkDetails at all backing
+    // it, just an oversized value. 1.0 is a real melee reach, scaled up
+    // from slimeBase's own maxDistance-to-bodyWidenes ratio (0.5/0.9) for
+    // this enemy's much larger frame (bodyWidenes 1.5, bodyHeight 3.5).
+    maxDistance: 1.0,
     name: "lesserdemon",
     dn: "Demon",
     modelStyle: "lesserdemon",
@@ -127,8 +360,116 @@ const lesserDemonBase = {
         { effectType: 'spdrain', chance: 10, permanent: false, dn: 'SP Drained', spcost: 20, hpcost: 0, mpcost: 0, hungercost: 4, energycost: 0 },
     ],
     titles: [],
-    skills: [],
-    aptitude: [],
+    // shadowbolt (skillsData.js - dark, projectileStyle "bolt", a particle
+    // trail with no mesh/material for fireEnemySkillProjectile's own cached
+    // InstancedMesh box to fight - see that function's own comment on why
+    // "lightning"/"halo" specifically would silently fail there) - resolved
+    // client-side via SKILLS_BY_NAME, same generic det.skills-driven
+    // casting interval every other skill-casting enemy already uses
+    skills: ['shadowbolt'],
+    aptitude: ['dark'],
+    blessings: [],
+    status: [],
+    regens: { sp: 1, hp: 1, mana: 1 },
+    monsSoul: 2,
+    race: "monster",
+    characterType: "enemy",
+    // "teleporting" not "chasing" - this enemy never walks toward its
+    // target at all (renderer.js's own movement loop only actually
+    // translates an enemy forward when det.actionType === "chasing", a
+    // guard added specifically for this). Instead it teleports in near
+    // whoever it's decided to approach (client/src/enemies/createEnemy.js's
+    // own lesserdemon-only teleport interval: telegraphs with a magic
+    // circle, teleports a beat later close enough to melee) rather than
+    // covering the distance on foot.
+    actionType: "teleporting",
+    _isMoving: false,
+    _targetId: false,
+    _dirTarg: { x: 0, y: 0, z: 0 },
+    _attacking: false,
+    _canAttack: true,
+    _disabled: false, // skill.enemyBind - see index.ts's enemyBind handler
+    _cursed: false, // dark magic's curse - see index.ts's enemyCurse handler
+    weaponBlocking: false,
+    magicBlocking: false,
+    IsInVulnerable: false,
+    loots: [coreDetails_1.simpleCoreLoot],
+    respawnDetails: {
+        willRespawn: true,
+        respawnTime: 5000 * 1000,
+    },
+};
+// ghost - modelStyle "ghost" (models/monsters/ghost.glb, with real
+// idle1/running1/attack1/attack2/hit1/hit2/death clips - confirmed by
+// reading the glb's own animation list). Rendered client-side by
+// containers.js's ghostRoot + createEnemy.js's "ghost" case, textured by
+// images/textures/enemy/ghost/ghost.jpg (createMonsterMaterial's
+// convention).
+//
+// A graveyard-only enemy - generateGhosts (below) is called from
+// enemyDetails.ts once per graveYards entry (localroomdb.js), scattered
+// through that graveyard's own square footprint via scatterPosition's
+// "square" branch, not one of the openworld radial bands every other
+// openworld enemy above uses. weakness: "light" - the classic
+// undead-vs-holy-magic matchup (client's skillEffects.js's own
+// getElementDamageMultiplier reads this the same way deerBase's own
+// weakness:"fire" already does), giving a light-element caster a reason to
+// visit.
+//
+// skills - createEnemy.js's casting interval picks one at random per cast.
+// blinkstrike goes through skillEffects.js's triggerEnemyBlinkstrike (a
+// telegraphed teleport + one boosted melee hit: (stats.dmg + the skill's
+// plusDmg 100) x1.5 guaranteed crit = 165 before the player's defense).
+// darkorb goes through the generic enemy projectile path (its custom orb
+// and stick-and-grow hit both work on a player target): the skill's
+// plusDmg 260 + magDmg x20 - see magDmg below.
+const ghostBase = {
+    maxDistance: 0.6,
+    name: "ghost",
+    dn: "Restless Spirit",
+    modelStyle: "ghost",
+    elementType: "dark",
+    weakness: "light",
+    // weapons and fists pass straight through it - tcp/index.ts's
+    // applyDamageToEnemy zeroes any hit whose dmgDetails.isPhysicalDmg is
+    // true (a real swing, a thrown weapon, dashstrike/blinkstrike, a melee
+    // bot) and tells every client to pop "miss" instead of a damage number
+    // (createEnemy.js's enemyIsHit). Skills and burn ticks still land
+    // normally - they never set isPhysicalDmg.
+    physicalImmune: true,
+    stats: {
+        dmg: 10,
+        // was 16 - fireEnemySkillProjectile scales an enemy's spell by
+        // plusDmg + magDmg x20, so 16 added 320 to every cast (a 580 darkorb
+        // against a lvl 13 player's 330 hp). 2 -> darkorb 300, still the
+        // ghost's big hit, telegraphed by its own 4s cast circle.
+        magDmg: 2,
+        spd: 3.6,
+        atkSpd: 2.2,
+        accuracy: 1.2,
+        critical: 1.5,
+    },
+    skills: ['blinkstrike', 'darkorb'],
+    canDodge: true,
+    lvl: 5,
+    hp: 1800,
+    maxHp: 1800,
+    expToGain: 350,
+    // ghost.glb hovers - its mesh spans y 0.56..1.68 above its own origin,
+    // which createEnemy.js always puts at ground level regardless of
+    // bodyHeight. 1.8 (not the 1.6 first tried) keeps createHpBar's
+    // bodyHeight/2+0.1 offset clear of the top of the head instead of
+    // sitting right on it.
+    bodyHeight: 1.8,
+    bodyWidenes: 0.8,
+    effects: [
+        { effectType: 'spdrain', chance: 10, permanent: false, dn: 'SP Drained', spcost: 20, hpcost: 0, mpcost: 0, hungercost: 4, energycost: 0 },
+    ],
+    effectsWhenHit: [
+        { effectType: 'spdrain', chance: 10, permanent: false, dn: 'SP Drained', spcost: 20, hpcost: 0, mpcost: 0, hungercost: 4, energycost: 0 },
+    ],
+    titles: ['haunt'],
+    aptitude: ['dark'],
     blessings: [],
     status: [],
     regens: { sp: 1, hp: 1, mana: 1 },
@@ -141,10 +482,17 @@ const lesserDemonBase = {
     _dirTarg: { x: 0, y: 0, z: 0 },
     _attacking: false,
     _canAttack: true,
+    _disabled: false, // skill.enemyBind - see index.ts's enemyBind handler
+    _cursed: false, // dark magic's curse - see index.ts's enemyCurse handler
+    weaponBlocking: false,
+    magicBlocking: false,
+    IsInVulnerable: false,
     loots: [coreDetails_1.simpleCoreLoot],
+    // between slimeBase's 10s and monolithBase's 30s - a graveyard "elite",
+    // not a trash mob, but still a themed area meant to be farmed a bit
     respawnDetails: {
         willRespawn: true,
-        respawnTime: 5000 * 1000,
+        respawnTime: 20 * 1000,
     },
 };
 function scatterPosition(areaType, half, minRadius, maxRadius) {
@@ -191,7 +539,10 @@ function scatterPosition(areaType, half, minRadius, maxRadius) {
         }
     }
     else {
-        // Non-village: spread anywhere across the map
+        // "square" (generateGhosts, below - scatter anywhere through the
+        // whole fenced graveyard plot rather than hugging its border the
+        // way "village" does) and any other/unrecognized areaType: spread
+        // anywhere within the square area centered on (centerX, centerZ).
         x = (Math.random() * 2 - 1) * half;
         z = (Math.random() * 2 - 1) * half;
     }
@@ -223,9 +574,45 @@ function generateEnemies(base, total, placeId, areaSize, areaType, centerX, cent
 function generateSlimes(total = 10, placeId = 1, areaSize = 300, areaType = "village", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
     return generateEnemies(slimeBase, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius);
 }
+function generateFireSlimes(total = 10, placeId = 1, areaSize = 300, areaType = "village", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
+    return generateEnemies(fireSlimeBase, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius);
+}
+function generateElectricSlimes(total = 10, placeId = 1, areaSize = 300, areaType = "village", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
+    return generateEnemies(electricSlimeBase, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius);
+}
+function generateDarkSlimes(total = 10, placeId = 1, areaSize = 300, areaType = "village", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
+    return generateEnemies(darkSlimeBase, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius);
+}
 function generateMonoliths(total = 5, placeId = 1, areaSize = 300, areaType = "village", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
     return generateEnemies(monolithBase, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius);
 }
+function generateForestDeer(total = 10, placeId = 1, areaSize = 300, areaType = "village", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
+    return generateEnemies(forestDeer, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius);
+}
+function generateJasferDeer(total = 10, placeId = 1, areaSize = 300, areaType = "village", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
+    return generateEnemies(jasferDeer, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius);
+}
+function generateLuminaDeer(total = 10, placeId = 1, areaSize = 300, areaType = "village", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
+    return generateEnemies(luminaDeer, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius);
+}
+function generateNightmareDeer(total = 10, placeId = 1, areaSize = 300, areaType = "village", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
+    return generateEnemies(nightmareDeer, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius);
+}
+function generateScorchDeer(total = 10, placeId = 1, areaSize = 300, areaType = "village", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
+    return generateEnemies(scorchDeer, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius);
+}
+function generateWisfDeer(total = 10, placeId = 1, areaSize = 300, areaType = "village", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
+    return generateEnemies(wisfDeer, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius);
+}
 function generateLesserDemons(total = 1, placeId = 1, areaSize = 300, areaType = "fixed", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
     return generateEnemies(lesserDemonBase, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius);
+}
+// areaType defaults to "square" (not "village"/"ring"/"fixed" like every
+// generator above) - a graveyard is a small fenced square, not a radial
+// territory or a border band, so its own enemy should scatter through the
+// whole plot instead. Call with the graveyard's own position/areaSize
+// (localroomdb.js's graveYards entries, creations/creategraveyard.js's own
+// same areaSize convention) as centerX/centerZ/areaSize.
+function generateGhosts(total = 5, placeId = 1, areaSize = 10, areaType = "square", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
+    return generateEnemies(ghostBase, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius);
 }
