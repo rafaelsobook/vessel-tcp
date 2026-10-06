@@ -10,7 +10,10 @@ import { dungeonWanderTarget } from "./recources/enemiesInDungeon"
 import startingQuests, { createSlaySlimesQuest, F_RANK_QUEST_COUNT } from "./recources/quests"
 import { generateSlimes, generateFireSlimes, generateElectricSlimes, generateMonoliths, generateDarkSlimes, generateLesserDemons } from "./generate-datas/genenemy"
 import { startingTreasures } from "./recources/treasures"
+import { DUNGEON_TREASURES } from "./recources/treasuresInDungeon"
 import { startingGrains, Tgrain } from "./recources/grains"
+import { DUNGEON_MUSHROOMS, Tmushroom } from "./recources/mushroomsInDungeon"
+import { MUSHROOM_LIBRARY, mushroomKind } from "./recources/mushroomLibrary"
 import { Brain, ATTITUDE_PRESETS, RESTING_Y } from "./recources/npcBrain"
 import { rollBotLevelReward, botTypeFor, botDamageAfterArmor } from "./recources/botItems"
 import { getWeather, getWeatherState, rollWeather, setWeather, WEATHER_ROLL_INTERVAL_MS } from "./recources/weather"
@@ -247,10 +250,18 @@ let obstaclesByPlace: Record<number, { x: number, z: number, radius: number }[]>
 
 let tcpEnemies = enemyArray
 let quests = startingQuests
-let treasures: Ttreasure[] = startingTreasures
+// the village's chests plus the dungeons' (treasuresInDungeon.ts)
+let treasures: Ttreasure[] = [...startingTreasures, ...DUNGEON_TREASURES]
 let bonfires: Tbonfire[] = []
 let trunks: Ttrunk[] = []
 let grains: Tgrain[] = startingGrains
+// mushrooms on the dungeon floors (mushroomsInDungeon.ts) - picked like grains.
+// What each kind is and gives: MUSHROOM_LIBRARY (recources/mushroomLibrary.ts) -
+// orange/brown/swamp/white everywhere (white rarer, and poisonous),
+// purple/bluemist/crimson/galaxygreen/devilred only deeper in
+let mushrooms: Tmushroom[] = DUNGEON_MUSHROOMS
+console.log(`[mushrooms] ${mushrooms.length} placed, ${MUSHROOM_LIBRARY.length} kinds:`,
+    MUSHROOM_LIBRARY.map(k => `${k.kind} ${mushrooms.filter(m => m.kind === k.kind).length}`).join(", "))
 let struckWeapons: Tstruckweapon[] = []
 
 // enemy._id -> a per-bind counter, only used by the enemyBind handler below
@@ -619,7 +630,7 @@ io.on("connection", (socket: Socket) => {
         // already carries treasures/bonfires instead of only their deltas.
         io.emit("userJoined", { currentPlaceId: data.currentPlace.placeId, newPlayerName: data.name,
             players, placesMD, tcpEnemies, quests,
-            treasures, bonfires, trunks, grains, struckWeapons,
+            treasures, bonfires, trunks, grains, mushrooms, struckWeapons,
             weather: getWeatherState(),
             dayNight: getDayNightState()
         }) // always send the updated players count
@@ -1162,6 +1173,18 @@ io.on("connection", (socket: Socket) => {
     safeOn(socket, "pickupGrain", grainId => {
         grains = grains.filter(grain => grain.grainId !== grainId)
         io.emit("grain-removed", grainId)
+    })
+    // client's createmushroom.js on pickup - removed for everyone like
+    // "pickupGrain" right above, but the ITEM comes from here: the server is
+    // the one that knows the kinds (MUSHROOM_LIBRARY), and only the player
+    // whose pickup actually found it still here gets one - a second player
+    // clicking the same mushroom in the same moment gets nothing
+    safeOn(socket, "pickupMushroom", mushroomId => {
+        const picked = mushrooms.find(mushroom => mushroom.mushroomId === mushroomId)
+        mushrooms = mushrooms.filter(mushroom => mushroom.mushroomId !== mushroomId)
+        io.emit("mushroom-removed", mushroomId)
+        const item = picked && mushroomKind(picked.kind)?.item()
+        if (item) socket.emit("mushroom-picked", { mushroomId, item })
     })
     safeOn(socket, "enemyWillAttack", data => {
         const { pos } = data
@@ -2654,7 +2677,7 @@ function spawnBot(overrides?: { attitudeName?: string, pos?: { x: number, z: num
     io.emit("userJoined", {
         currentPlaceId: botPlayer.currentPlace.placeId, newPlayerName: botPlayer.name, isBot: true,
         players, placesMD, tcpEnemies, quests,
-        treasures, bonfires, trunks, grains, struckWeapons,
+        treasures, bonfires, trunks, grains, mushrooms, struckWeapons,
         weather: getWeatherState(),
         dayNight: getDayNightState()
     })

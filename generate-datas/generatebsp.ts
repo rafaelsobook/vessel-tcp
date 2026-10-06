@@ -614,6 +614,196 @@ function placeLights(rooms, wallH, bossElevation) {
     }));
 }
 
+// ─── Nature: river, vases, ore, grass ──────────────────────────────────────
+// All of it rolls on its OWN rng (seed + 2) and runs once the layout, props and
+// slabs are final, so it never moves any of them - a dungeon comes out exactly
+// as it did before, plus these. Cell units like the rest of the layout, except
+// resources[].position (world units - areascene.js reads it as-is).
+//
+// Each pass takes the cells the passes before it claimed (`taken`), so nothing
+// stacks: river first, then vases, ore, and grass last around all of them.
+
+// a river crosses a room wall to wall - rooms shorter than this along its flow get none
+const RIVER_MIN_LENGTH  = 5;
+// meander rolls per room and direction before trying the next
+const RIVER_TRIES       = 16;
+// per cell of flow, the chance the channel steps one cell sideways
+const RIVER_BEND_CHANCE = 0.35;
+
+// one ore per this many room cells - at least one per room, at most MAX_ORE_PER_ROOM
+const CELLS_PER_ORE    = 30;
+const MAX_ORE_PER_ROOM = 2;
+// what an ore is when the caller gave no resourceTemplates (tcp only needs the cells)
+const DEFAULT_RESOURCE = { resourceType: "ore", name: "ore", loots: [] };
+
+// grass density (0-1) is how thick a cell's tufts are - createDungeon scatters
+// that fraction of its per-cell maximum
+const GRASS_BANK_DENSITY      = 0.9;   // the river's banks, the lushest
+const GRASS_PATCHES_PER_ROOM  = 2;
+const GRASS_PATCH_RADIUS      = 2;     // cells a patch may spread from its seed
+const GRASS_SPREAD_CHANCE     = 0.55;
+const GRASS_CORRIDOR_CHANCE   = 0.08;  // tufts pushing up between corridor flagstones
+
+const DIRS8 = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
+
+// A room's floor without its edge row/column - where props, slabs and ore go,
+// leaving the edge clear for doorways and the exit (see roomPaths)
+function roomInterior({ x, y, width: w, height: h }) {
+    const cells = [];
+    for (let cy = y + 1; cy < y + h - 1; cy++)
+        for (let cx = x + 1; cx < x + w - 1; cx++) cells.push({ x: cx, y: cy });
+    return cells;
+}
+
+// One stream across `room`, from wall to wall, meandering a cell sideways now
+// and then. Both ends must butt against solid wall (not a doorway), so the
+// water reads as flowing out of one wall and into the other. Raised slabs in
+// its way stay - they stick out of the water like stepping stones.
+// Returns { axis, cells } - axis "z" flows along the grid's rows (y), "x"
+// along its columns - or null if the room has no such line.
+function carveRiver(room, grid, rng, taken) {
+    const { x, y, width: w, height: h } = room.bounds;
+    // the long way first - a longer river through the room's length
+    const axes = w > h ? ["x", "z"] : ["z", "x"];
+    for (const axis of axes) {
+        const length = axis === "z" ? h : w;
+        const span   = axis === "z" ? w : h;
+        if (length < RIVER_MIN_LENGTH || span < 3) continue;
+        // (along, across) in room-relative cells -> grid cell
+        const cellAt = (along, across) => axis === "z"
+            ? { x: x + across, y: y + along }
+            : { x: x + along, y: y + across };
+
+        for (let t = 0; t < RIVER_TRIES; t++) {
+            let across = rInt(rng, 1, span - 2);
+            const startAcross = across;
+            const cells = [];
+            for (let along = 0; along < length; along++) {
+                if (along > 0 && rng() < RIVER_BEND_CHANCE) {
+                    const next = Math.min(span - 2, Math.max(1, across + (rng() < 0.5 ? -1 : 1)));
+                    // the cell under the bend too, so the channel stays joined
+                    // edge to edge rather than touching only at a corner
+                    if (next !== across) { cells.push(cellAt(along, across)); across = next; }
+                }
+                cells.push(cellAt(along, across));
+            }
+            const head = cellAt(-1, startAcross), mouth = cellAt(length, across);
+            if (get(grid, head.x, head.y) !== T_WALL || get(grid, mouth.x, mouth.y) !== T_WALL) continue;
+            if (cells.some(c => get(grid, c.x, c.y) !== T_FLOOR || taken.has(cellKey(c.x, c.y)))) continue;
+            return { axis, cells };
+        }
+    }
+    return null;
+}
+
+function placeNature({ rooms, grid, props, tileHeights, bossRoom, bossStairKeys, spawn, cellSize, rng,
+        riverCount, resourceTemplates }) {
+    // the spawn cell and every prop (torches, barrels, chests) are spoken for
+    const taken = new Set([cellKey(spawn.x, spawn.y), ...props.map(p => cellKey(p.x, p.y))]);
+    const claim = c => taken.add(cellKey(c.x, c.y));
+    const isLevel = c => (tileHeights[cellKey(c.x, c.y)] ?? 0) <= TILE_JITTER_NORMAL.max;
+    const isFree  = c => get(grid, c.x, c.y) === T_FLOOR && !taken.has(cellKey(c.x, c.y));
+    const ordinary = rooms.filter(r => r.type !== "entrance" && r.type !== "boss_room");
+
+    // ── Rivers - the biggest rooms first, one river per room ─────────────────
+    const rivers = [];
+    const byArea = [...ordinary].sort((a, b) => b.bounds.width * b.bounds.height - a.bounds.width * a.bounds.height);
+    for (const room of byArea) {
+        if (rivers.length >= riverCount) break;
+        const river = carveRiver(room, grid, rng, taken);
+        if (!river) continue;
+        river.cells.forEach(claim);
+        rivers.push({ id: `river_${rivers.length}`, roomId: room.id, ...river });
+    }
+
+    // ── Vases - a display pair across from each room's torches; the boss hall
+    // gets one in every corner of its dais ──────────────────────────────────
+    const vases = [];
+    rooms.forEach((room, ri) => {
+        const { x, y, width: w, height: h } = room.bounds;
+        const spots = room.type === "boss_room"
+            ? [{ x: x + 1, y: y + 1 }, { x: x + w - 2, y: y + 1 }, { x: x + 1, y: y + h - 2 }, { x: x + w - 2, y: y + h - 2 }]
+                .filter(c => !bossStairKeys.has(cellKey(c.x, c.y)))
+            : [{ x: x + 1, y: y + h - 2 }, { x: x + w - 2, y: y + h - 2 }];
+        spots.forEach((c, vi) => {
+            // the rotation is rolled for every spot, used or not, so one
+            // blocked spot doesn't reshuffle every vase after it
+            const rotation = rInt(rng, 0, 359);
+            if (!isFree(c) || !isLevel(c)) return;
+            claim(c);
+            vases.push({ id: `vase_${ri}_${vi}`, type: "vase", x: c.x, y: c.y, rotation });
+        });
+    });
+
+    // ── Ore - against the walls of every ordinary room, never two side by side ─
+    const templates = resourceTemplates?.length ? resourceTemplates : [DEFAULT_RESOURCE];
+    const resources = [];
+    const solid = new Set([...props, ...vases].map(p => cellKey(p.x, p.y)));
+    ordinary.forEach(room => {
+        const { width: w, height: h } = room.bounds;
+        const count = Math.min(MAX_ORE_PER_ROOM, Math.max(1, Math.round(w * h / CELLS_PER_ORE)));
+        const nearWall = c => c.x === room.bounds.x + 1 || c.x === room.bounds.x + w - 2
+                           || c.y === room.bounds.y + 1 || c.y === room.bounds.y + h - 2;
+        // a cell of floor between it and any prop or vase, so nothing ends up
+        // wedged in a row (the river's bank is fine)
+        const clearOfProps = c => DIRS8.every(([dx, dy]) => !solid.has(cellKey(c.x + dx, c.y + dy)));
+        let candidates = roomInterior(room.bounds).filter(c => nearWall(c) && isFree(c) && isLevel(c) && clearOfProps(c));
+        for (let i = 0; i < count && candidates.length; i++) {
+            const c = candidates[Math.floor(rng() * candidates.length)];
+            const rotation = rng() * Math.PI * 2;
+            claim(c);
+            // no other ore on it or around it
+            candidates = candidates.filter(o => Math.abs(o.x - c.x) > 1 || Math.abs(o.y - c.y) > 1);
+            // dealt round-robin, never by rng - which template an ore gets can't
+            // change where anything goes (tcp passes no templates at all)
+            const template = templates[resources.length % templates.length];
+            resources.push({
+                physics: { opt: { mass: 0 }, type: "box" },
+                scale: null,
+                ...template,
+                resourceId: `${template.name}_${resources.length}`,
+                position: { x: (c.x + 0.5) * cellSize, y: tileHeights[cellKey(c.x, c.y)] ?? 0, z: (c.y + 0.5) * cellSize },
+                rotation,
+                cell: { x: c.x, y: c.y },
+            });
+        }
+    });
+
+    // ── Grass - thick along the rivers, a few patches per room, the odd tuft in
+    // the corridors; none in the boss hall ─────────────────────────────────────
+    const grass = new Map();   // cellKey -> { x, y, density }
+    const sprout = (c, density) => {
+        if (!isFree(c) || inRect(bossRoom, c.x, c.y)) return;
+        const k = cellKey(c.x, c.y);
+        grass.set(k, { x: c.x, y: c.y, density: Math.max(density, grass.get(k)?.density ?? 0) });
+    };
+    rivers.forEach(river => river.cells.forEach(c => DIRS8.forEach(([dx, dy]) =>
+        sprout({ x: c.x + dx, y: c.y + dy }, GRASS_BANK_DENSITY * (0.7 + 0.3 * rng())))));
+    rooms.forEach(room => {
+        if (room.type === "boss_room") return;
+        const interior = roomInterior(room.bounds);
+        for (let p = 0; p < GRASS_PATCHES_PER_ROOM && interior.length; p++) {
+            const seed = interior[Math.floor(rng() * interior.length)];
+            for (let dy = -GRASS_PATCH_RADIUS; dy <= GRASS_PATCH_RADIUS; dy++)
+                for (let dx = -GRASS_PATCH_RADIUS; dx <= GRASS_PATCH_RADIUS; dx++) {
+                    const ring = Math.max(Math.abs(dx), Math.abs(dy));
+                    const roll = rng();
+                    // the seed always, then thinner and rarer further out
+                    if (ring === 0 || roll < GRASS_SPREAD_CHANCE / ring)
+                        sprout({ x: seed.x + dx, y: seed.y + dy }, 0.8 / (ring + 1) + 0.2);
+                }
+        }
+    });
+    const inAnyRoom = (x, y) => rooms.some(r => inRect({ x: r.bounds.x, y: r.bounds.y, w: r.bounds.width, h: r.bounds.height }, x, y));
+    for (let gy = 0; gy < grid.length; gy++)
+        for (let gx = 0; gx < grid[gy].length; gx++) {
+            if (grid[gy][gx] !== T_FLOOR || inAnyRoom(gx, gy)) continue;
+            if (rng() < GRASS_CORRIDOR_CHANCE) sprout({ x: gx, y: gy }, 0.25);
+        }
+
+    return { rivers, vases, resources, grass: [...grass.values()] };
+}
+
 // ─── Public API ────────────────────────────────────────────────────────────
 // sceneTemp/placeId/seed default to undefined explicitly - TypeScript infers
 // this options object's type from the defaults, and tcp's copy of this file
@@ -639,6 +829,13 @@ export function generateBSPDungeon({
     exitPlaceDetail = null,
     // world units the boss room's dais stands above the rest of the floor
     bossElevation   = 2,
+    // streams across the biggest rooms (fewer if not enough rooms fit one)
+    riverCount      = 1,
+    // what each ore is - { resourceType, name, loots, physics? } like any
+    // place's resources[] entry minus its position, dealt round-robin onto the
+    // spots placeNature picks. Doesn't change WHERE ore goes, so tcp's copy of
+    // this dungeon can leave it out and still know every ore cell.
+    resourceTemplates = [],
 } = {}) {
     if (seed === undefined) {
         // every client generates its own copy of the dungeon, so the old
@@ -715,6 +912,22 @@ export function generateBSPDungeon({
     const tileHeights  = buildTileHeightMap(grid, leaves.map(l => l.room), bossRoom,
         { x: spawnGX, y: spawnGZ }, protectedCells, jitterRng);
 
+    // ── River, vases, ore, grass ───────────────────────────────────────────
+    // seed + 2: its own sequence again, after everything it has to fit around.
+    // The cells the boss staircase is cut into stay clear of vases.
+    const bossStairKeys = new Set();
+    if (bossEntrance && elevation > 0)
+        bossEntrance.cells.forEach(c => {
+            for (let k = 1; k <= daisStairCells; k++) bossStairKeys.add(cellKey(c.x + bossEntrance.dx * k, c.y + bossEntrance.dz * k));
+        });
+    const nature = placeNature({
+        rooms, grid, props, tileHeights, bossRoom, bossStairKeys, cellSize,
+        spawn: { x: spawnGX, y: spawnGZ },
+        rng: seededRNG(seed + 2),
+        riverCount, resourceTemplates,
+    });
+    props.push(...nature.vases);
+
     // x/z in cell units like the rest of the layout, +0.5 so getSpawnPos's
     // cell * cellSize lands in the middle of the spawn cell rather than on
     // its corner. y is the arrival height above the floor (a short drop).
@@ -764,8 +977,17 @@ export function generateBSPDungeon({
         // (dais elevation) + dungeon.tileHeights[`${gx}_${gz}`]
         tileHeights,
         doors:  [],
+        // vases included (placeNature) - type "vase"
         props,
         rocks,
+        // [{ id, roomId, axis, cells: [{x, y}] }] - axis "z" flows along the
+        // grid's rows, "x" along its columns. Walkable shallow water.
+        rivers: nature.rivers,
+        // [{ x, y, density }] - cells with grass, density 0-1
+        grass:  nature.grass,
+        // ore, in the shape areascene.js already mines any place's resources[] in
+        // (world-unit position), plus `cell` - the grid cell it stands on
+        resources: nature.resources,
         lighting: {
             ambient: { intensity: 0.15, color: "#2a2a3e" },
             lights,
