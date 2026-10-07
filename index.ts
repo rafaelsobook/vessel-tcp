@@ -2787,10 +2787,20 @@ const SLIME_SPAWN_NEARBY_RADIUS = 40
 // the whole 0-3000 territory." Now it looks up whichever band the player's
 // own distFromCenter actually falls into and only ever tops up with THAT
 // type - a player in waterslime's band gets more waterslime, nothing else.
+// Resting players get no new slimes dropped next to them. A real player is
+// resting while seated (chair, log, a tent's bed - "sit-down" sets `seat`,
+// "stand-up" clears it; player.mode can't be trusted for this, every
+// emitLoc/emitmove/emitStop overwrites it with the client's own mode). A bot is
+// resting while napping (currentMood "rest", see its goalInterval). Slimes
+// already in the area are left alone - this only stops new ones spawning.
+function isPlayerResting(player: Tplayers){
+    return !!player.seat || player.currentMood === "rest"
+}
 setInterval(() => {
     players.forEach(player => {
         if(player.currentPlace?.placeId !== 888) return
         if(!player.pos) return
+        if(isPlayerResting(player)) return
 
         const { center, minDist, maxDist } = OPENWORLD_SLIME_TERRITORY
         const distFromCenter = Math.hypot(player.pos.x - center.x, player.pos.z - center.z)
