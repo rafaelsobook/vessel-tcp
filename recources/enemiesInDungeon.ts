@@ -1,5 +1,5 @@
-import { generateGhosts, generateLesserDemons } from "../generate-datas/genenemy"
-import { DUNGEONS, Cell, Rect, cellKey, toWorld, roomRect, bossRect, bossThrone, standableCells, floorY } from "./dungeonLayouts"
+import { generateGhosts, generateLesserDemons, generateIceScorpions } from "../generate-datas/genenemy"
+import { DUNGEONS, Cell, Rect, cellKey, toWorld, roomRect, bossRect, bossThrone, standableCells, floorY, walkingDepth } from "./dungeonLayouts"
 
 // Enemies that live inside the procedural BSP dungeons - where they spawn and
 // where they may wander, checked against the real layout (see dungeonLayouts.ts).
@@ -7,6 +7,10 @@ import { DUNGEONS, Cell, Rect, cellKey, toWorld, roomRect, bossRect, bossThrone,
 // ghosts per ordinary room: one per this many floor cells, 1 to MAX per room
 const CELLS_PER_GHOST = 12
 const MAX_GHOSTS_PER_ROOM = 3
+// the frost scorpion guards the biggest ordinary room at least this deep
+// (walking distance from the entrance, 0-1) - the deeper half, on the way to
+// the boss, and a big room because it's a big monster
+const SCORPION_MIN_DEPTH = 0.5
 
 // genenemy's "fixed" generators place one enemy exactly at (x, z) with y 0 -
 // lifted onto its cell's real floor here, and tagged with the room it belongs to
@@ -37,6 +41,25 @@ function spawnDungeonEnemies(placeId: number, dungeon: any) {
             enemies.push(place(generateGhosts(1, placeId, 0, "fixed", x, z)[0], dungeon, c, home, false))
         }
     })
+
+    // the frost scorpion - one, in the biggest ordinary room of the deeper
+    // half, on the open cell nearest that room's middle; it wanders that room
+    const depth = walkingDepth(dungeon)
+    const lair = dungeon.rooms
+        .filter((room: any) => room.type !== "entrance" && room.type !== "boss_room")
+        .map((room: any) => ({ room, rect: roomRect(room) }))
+        .filter(({ rect }: { rect: Rect }) => (depth.get(cellKey({ x: rect.x + Math.floor(rect.w / 2), y: rect.y + Math.floor(rect.h / 2) })) ?? 0) >= SCORPION_MIN_DEPTH)
+        .sort((a: any, b: any) => b.rect.w * b.rect.h - a.rect.w * a.rect.h)[0]
+    if (lair) {
+        const { rect } = lair
+        const mid = { x: rect.x + (rect.w - 1) / 2, y: rect.y + (rect.h - 1) / 2 }
+        const spot = standableCells(dungeon, rect, false)
+            .sort((a, b) => Math.hypot(a.x - mid.x, a.y - mid.y) - Math.hypot(b.x - mid.x, b.y - mid.y))[0]
+        if (spot) {
+            const { x, z } = toWorld(dungeon, spot)
+            enemies.push(place(generateIceScorpions(1, placeId, 0, "fixed", x, z)[0], dungeon, spot, rect, false))
+        }
+    }
 
     // boss - the lesser demon, on the dais at the far end from the stairs,
     // facing the way players come up

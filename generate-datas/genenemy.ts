@@ -1,5 +1,5 @@
 import { randNumString } from "../tools/tools"
-import { simpleCoreLoot, waterslimeCoreLoot, fireslimeCoreLoot, electricslimeCoreLoot, darkslimeCoreLoot } from "../recources/coreDetails"
+import { simpleCoreLoot, waterslimeCoreLoot, fireslimeCoreLoot, electricslimeCoreLoot, darkslimeCoreLoot, celestineOreLoot } from "../recources/coreDetails"
 
 const slimeBase = {
     maxDistance: 0.5,
@@ -492,6 +492,92 @@ const ghostBase = {
     },
 }
 
+// giant scorpion - modelStyle "giantscorpion" (models/monsters/giantscorpion.glb,
+// idle1/running1/attack1/attack2/hit1/death - the same clip names ghost.glb
+// uses, so createEnemy.js plays it with no special cases). ONE rig for every
+// kind of scorpion: a kind is a copy of this base with its own `name`, which
+// picks its skin (images/textures/enemy/giantscorpion/<name>.jpg -
+// createMonsterMaterial's convention), plus stats/element/loot.
+//
+// modelScale/modelYaw (createEnemy.js applies both): as exported the model is
+// ~3x too big (a 4.6-wide body, tail curling 12+ up) and faces -z - 0.38
+// makes it ~2.5 wide and ~5 tall tail-up, a real giant next to a 1.5-tall
+// player that still fits a dungeon's 4-unit cells; Math.PI turns it to face
+// the way it walks.
+const giantScorpionBase = {
+    // reach - its tail strikes well ahead of it
+    maxDistance: 1.4,
+    name: "giantscorpion",
+    dn: "Giant Scorpion",
+    modelStyle: "giantscorpion",
+    modelScale: 0.38,
+    modelYaw: Math.PI,
+    elementType: "earth",
+    stats: {
+        dmg: 22,
+        magDmg: 1,
+        spd: 3.0,
+        atkSpd: 2.0,
+        accuracy: 1.2,
+        critical: 1.5,
+    },
+    lvl: 6,
+    hp: 3200,
+    maxHp: 3200,
+    expToGain: 420,
+    // the hp bar and name sit over its back, below the raised tail
+    bodyHeight: 2.0,
+    bodyWidenes: 1.6,
+    // the sting - same "poisoned" shape the venomous enemies use, lifted
+    // by the same cures (lunaraqum's cure: ["poisoned"])
+    effects: [
+        { effectType: 'poisoned', chance: 15, permanent: true, dn: 'Scorpion Venom', spcost: 10, hpcost: 15, mpcost: 0, hungercost: 2, energycost: 0 },
+    ],
+    effectsWhenHit: [],
+    titles: ['scorpion'],
+    aptitude: ['earth'],
+    skills: [] as string[],
+    canDodge: false,
+    blessings: [],
+    status: [],
+    regens: { sp: 1, hp: 1, mana: 1 },
+    monsSoul: 3,
+    race: "monster",
+    characterType: "enemy",
+    actionType: "chasing",
+    _isMoving: false,
+    _targetId: false as string | false,
+    _dirTarg: { x: 0, y: 0, z: 0 },
+    _attacking: false,
+    _canAttack: true,
+    _disabled: false, // skill.enemyBind - see index.ts's enemyBind handler
+    _cursed: false, // dark magic's curse - see index.ts's enemyCurse handler
+    weaponBlocking: false,
+    magicBlocking: false,
+    IsInVulnerable: false,
+    loots: [simpleCoreLoot],
+    respawnDetails: {
+        willRespawn: true,
+        respawnTime: 30 * 1000,
+    },
+}
+
+// the first kind - icy, crystal-skinned (images/textures/enemy/giantscorpion/
+// icescorpion.jpg). skin: "crystal" gives it the client's crystal material
+// (enemies/skins.js's createCrystalMat - glints and a cold rim glow) instead
+// of a plain textured one. Ice melts: weak to fire.
+const iceScorpionBase = {
+    ...giantScorpionBase,
+    name: "icescorpion",
+    dn: "Frost Scorpion",
+    elementType: "water",
+    weakness: "fire",
+    skin: "crystal",
+    titles: ['frost scorpion'],
+    aptitude: ['water'],
+    loots: [celestineOreLoot],
+}
+
 function scatterPosition(areaType: string, half: number, minRadius: number, maxRadius: number) {
     let x: number, z: number
 
@@ -628,4 +714,8 @@ export function generateLesserDemons(total = 1, placeId = 1, areaSize = 300, are
 // same areaSize convention) as centerX/centerZ/areaSize.
 export function generateGhosts(total = 5, placeId = 1, areaSize = 10, areaType = "square", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
     return generateEnemies(ghostBase, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius)
+}
+
+export function generateIceScorpions(total = 1, placeId = 1, areaSize = 10, areaType = "square", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
+    return generateEnemies(iceScorpionBase, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius)
 }

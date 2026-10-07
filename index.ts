@@ -204,6 +204,19 @@ type Ttrunk = {
     currentPlaceId: number
 }
 
+// every other campcraft structure (client assetcreation/createstructure.js -
+// the leaf bed tent, the spike barricade, whatever comes next): one list and
+// one "craft-structure" event for all of them, the kind riding along, rather
+// than a Tbonfire/Ttrunk-style type and event per structure. Same permanence:
+// never removed once placed. rotY is which way it faces (toward its builder).
+type Tstructure = {
+    craftId: string
+    kind: string
+    pos: { x: number, y: number, z: number }
+    rotY: number
+    currentPlaceId: number
+}
+
 // A weapon struck into the ground or into an enemy's body (client's
 // itemInfoSystem.js's struckItemFunc "struck" button, and skills.js's
 // spawnProjectile - a thrown spear's env-hit/enemy-hit cases) -
@@ -254,6 +267,7 @@ let quests = startingQuests
 let treasures: Ttreasure[] = [...startingTreasures, ...DUNGEON_TREASURES]
 let bonfires: Tbonfire[] = []
 let trunks: Ttrunk[] = []
+let structures: Tstructure[] = []
 let grains: Tgrain[] = startingGrains
 // mushrooms on the dungeon floors (mushroomsInDungeon.ts) - picked like grains.
 // What each kind is and gives: MUSHROOM_LIBRARY (recources/mushroomLibrary.ts) -
@@ -630,7 +644,7 @@ io.on("connection", (socket: Socket) => {
         // already carries treasures/bonfires instead of only their deltas.
         io.emit("userJoined", { currentPlaceId: data.currentPlace.placeId, newPlayerName: data.name,
             players, placesMD, tcpEnemies, quests,
-            treasures, bonfires, trunks, grains, mushrooms, struckWeapons,
+            treasures, bonfires, trunks, structures, grains, mushrooms, struckWeapons,
             weather: getWeatherState(),
             dayNight: getDayNightState()
         }) // always send the updated players count
@@ -758,6 +772,17 @@ io.on("connection", (socket: Socket) => {
         io.emit("trunk-crafted", trunk)
     })
 
+    // client's campcraft.js for any createstructure.js kind - same trust level
+    // and echo-to-everyone shape as "craft-trunk" right above
+    safeOn(socket, "craft-structure", data => {
+        const { placeId, position, craftId, kind, rotY } = data
+        if (typeof kind !== "string" || !position) return
+        if (structures.some(st => st.craftId === craftId)) return
+        const structure: Tstructure = { craftId, kind, pos: position, rotY: Number(rotY) || 0, currentPlaceId: placeId }
+        structures.push(structure)
+        io.emit("structure-crafted", structure)
+    })
+
     // client's assetcreation/creategroundweapon.js already rendered this
     // LOCALLY the instant the player struck it (struckItemFunc's "struck"
     // button, or a thrown spear's env-hit/enemy-hit case) - same
@@ -823,7 +848,9 @@ io.on("connection", (socket: Socket) => {
     // racing for the same seat get settled: first claim wins, the other gets
     // "sit-rejected" and stands back up on their own client.
     safeOn(socket, "sit-down", data => {
-        const { ownerId, placeId, seatId } = data
+        // pose - "sitting" on a chair/log, "sleeping" in a tent's bed (the
+        // client's seating.js); it's the mode anyone joining later sees them in
+        const { ownerId, placeId, seatId, pose } = data
         const player = players.find(user => user.owner === ownerId)
         if(!player) return
 
@@ -833,7 +860,7 @@ io.on("connection", (socket: Socket) => {
         // switching seats without standing first - free the old one
         if(player.seat) io.emit("player-stood", { ownerId, ...player.seat })
         player.seat = { placeId, seatId }
-        player.mode = "sitting"
+        player.mode = pose === "sleeping" ? "sleeping" : "sitting"
         io.emit("player-sat", { ownerId, placeId, seatId })
     })
     safeOn(socket, "stand-up", data => {
@@ -2677,7 +2704,7 @@ function spawnBot(overrides?: { attitudeName?: string, pos?: { x: number, z: num
     io.emit("userJoined", {
         currentPlaceId: botPlayer.currentPlace.placeId, newPlayerName: botPlayer.name, isBot: true,
         players, placesMD, tcpEnemies, quests,
-        treasures, bonfires, trunks, grains, mushrooms, struckWeapons,
+        treasures, bonfires, trunks, structures, grains, mushrooms, struckWeapons,
         weather: getWeatherState(),
         dayNight: getDayNightState()
     })

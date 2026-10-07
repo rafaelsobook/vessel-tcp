@@ -107,3 +107,19 @@ export const mediumCoreLoot = {
     desc: "core found on larger monsters, useful for enhancing stronger items",
     rarity: "uncommon"
 }
+
+// not a core - the same "Celestine Ore" the client's resourceLoot.js mints
+// (name "celestineore", so it stacks with any already mined, and shows that
+// item's icon). The frost scorpion (genenemy.ts) drops it: an icy crystal
+// shard off a crystal-skinned monster.
+export const celestineOreLoot = {
+    itemId: randNumString(),
+    name: "celestineore",
+    dn: "Celestine Ore",
+    itemCateg: "crafting",
+    itemType: "material",
+    qnty: 1,
+    price: { coinType: "bronze", pieces: 15 },
+    desc: "A shard of Celestine Ore, prized by enchanters.",
+    rarity: "rare"
+}
