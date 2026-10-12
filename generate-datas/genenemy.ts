@@ -1,5 +1,5 @@
 import { randNumString } from "../tools/tools"
-import { simpleCoreLoot, waterslimeCoreLoot, fireslimeCoreLoot, electricslimeCoreLoot, darkslimeCoreLoot, celestineOreLoot } from "../recources/coreDetails"
+import { simpleCoreLoot, mediumCoreLoot, waterslimeCoreLoot, fireslimeCoreLoot, electricslimeCoreLoot, darkslimeCoreLoot, celestineOreLoot } from "../recources/coreDetails"
 
 const slimeBase = {
     maxDistance: 0.5,
@@ -578,6 +578,207 @@ const iceScorpionBase = {
     loots: [celestineOreLoot],
 }
 
+// stray wolf - modelStyle "wolf" (models/monsters/wolf.glb, idle1/running1/
+// attack1/attack2/hit1/hit2/death - the same clip names ghost.glb and
+// giantscorpion.glb use, so createEnemy.js plays it with no special cases),
+// skinned by images/textures/enemy/wolf/straywolf.jpg (createMonsterMaterial's
+// convention). A fast hunter: spd 9 out-runs everything else here (deer 8,
+// monolith 7) but stays under the player's sprint (inputMovement.js's
+// sprintSpeed 10) - you can still get away from one, just barely. No walkSpd:
+// the model has no walking clip, so it lopes everywhere on running1. They
+// roam the openworld's outermost band, past the forest deer (enemyDetails.ts's
+// OPENWORLD_ENEMY_BANDS), so they sit just above the deer's tier: a touch
+// more level, a little less hp, quicker, lighter bites.
+const strayWolfBase = {
+    maxDistance: 0.8,
+    name: "straywolf",
+    dn: "Stray Wolf",
+    modelStyle: "wolf",
+    elementType: "none",
+    weakness: "fire",
+    stats: {
+        dmg: 36,
+        magDmg: 1,
+        spd: 9,
+        atkSpd: 4,
+        accuracy: 1.4,
+        critical: 1.6,
+    },
+    lvl: 22,
+    hp: 5200,
+    maxHp: 5200,
+    expToGain: 1100,
+    // the hp bar clears its ears (head top ~1.55 when it stands up)
+    bodyHeight: 1.6,
+    bodyWidenes: 1.0,
+    effects: [],
+    effectsWhenHit: [],
+    titles: ['wolf'],
+    aptitude: [],
+    skills: [] as string[],
+    canDodge: true,
+    blessings: [],
+    status: [],
+    regens: { sp: 1, hp: 1, mana: 1 },
+    monsSoul: 2,
+    race: "monster",
+    characterType: "enemy",
+    actionType: "chasing",
+    _isMoving: false,
+    _targetId: false as string | false,
+    _dirTarg: { x: 0, y: 0, z: 0 },
+    _attacking: false,
+    _canAttack: true,
+    _disabled: false, // skill.enemyBind - see index.ts's enemyBind handler
+    _cursed: false, // dark magic's curse - see index.ts's enemyCurse handler
+    weaponBlocking: false,
+    magicBlocking: false,
+    IsInVulnerable: false,
+    // required - createEnemy.js's death handler reads loots.length unguarded
+    loots: [simpleCoreLoot],
+    respawnDetails: {
+        willRespawn: true,
+        respawnTime: 60 * 1000,
+    },
+}
+
+// standing wolves - modelStyle "standingwolf" (models/monsters/standingwolf.glb),
+// four named werewolves on ONE rig: each one's `name` picks its skin
+// (images/textures/enemy/standingwolf/<name>.jpg, createMonsterMaterial's
+// convention), and its element, skill and loot follow that skin. The village's
+// elites, in rising order: Vargoth (plain brown - the brawler, pounces),
+// Zareth (crimson, ember-veined - fire), Morvane (black-marked - dark) and
+// Skallgrim (frost-white - the strongest).
+//
+// NOTE the glb only has an idle1 clip so far - no running1/attack1/hit/death.
+// createEnemy.js/renderer.js skip missing clips quietly, so until those are
+// added a standing wolf glides after you in its idle pose and vanishes on
+// death without a death animation. Add the clips under those names and they
+// play with no code change.
+const standingWolfBase = {
+    maxDistance: 1.3,
+    // sight - notices a player this far off, any direction (createEnemy.js's
+    // det.detectRange poll), roars at them (its roar1 clip) and comes for
+    // them. Every other enemy only notices you once you bump into it or hit it.
+    detectRange: 24,
+    modelStyle: "standingwolf",
+    elementType: "none",
+    weakness: "light",
+    stats: {
+        dmg: 45,
+        magDmg: 2,
+        spd: 6,
+        atkSpd: 3,
+        accuracy: 1.4,
+        critical: 1.6,
+    },
+    lvl: 18,
+    hp: 7000,
+    maxHp: 7000,
+    expToGain: 1400,
+    // ~2.9 tall in its crouch, about twice the player - 3.0 keeps the hp bar
+    // just over its ears
+    bodyHeight: 3.0,
+    bodyWidenes: 1.6,
+    effects: [] as any[],
+    effectsWhenHit: [] as any[],
+    titles: ['werewolf'],
+    aptitude: [] as string[],
+    skills: [] as string[],
+    canDodge: true,
+    blessings: [],
+    status: [],
+    regens: { sp: 1, hp: 1, mana: 1 },
+    monsSoul: 3,
+    race: "monster",
+    characterType: "enemy",
+    actionType: "chasing",
+    _isMoving: false,
+    _targetId: false as string | false,
+    _dirTarg: { x: 0, y: 0, z: 0 },
+    _attacking: false,
+    _canAttack: true,
+    _disabled: false, // skill.enemyBind - see index.ts's enemyBind handler
+    _cursed: false, // dark magic's curse - see index.ts's enemyCurse handler
+    weaponBlocking: false,
+    magicBlocking: false,
+    IsInVulnerable: false,
+    loots: [mediumCoreLoot],
+    respawnDetails: {
+        willRespawn: true,
+        respawnTime: 60 * 1000,
+    },
+}
+
+// the brawler - no magic, just the pounce (blinkstrike: a telegraphed leap
+// to you and one boosted swipe, skillEffects.js's triggerEnemyBlinkstrike)
+const vargoth = {
+    ...standingWolfBase,
+    name: "vargoth",
+    dn: "Vargoth",
+    weakness: "lightning",
+    skills: ['blinkstrike'],
+}
+
+// ember-veined - burns (flamebrand), drops a fire core
+const zareth = {
+    ...standingWolfBase,
+    name: "zareth",
+    dn: "Zareth",
+    elementType: "fire",
+    weakness: "water",
+    aptitude: ['fire'],
+    skills: ['flamebrand'],
+    stats: { ...standingWolfBase.stats, dmg: 50, magDmg: 3 },
+    lvl: 22,
+    hp: 8500,
+    maxHp: 8500,
+    expToGain: 1800,
+    effects: [
+        // characterstate.js's startBurnDamage - dmgPm off your hp each tick for duration ms
+        { effectType: 'burn', chance: 15, permanent: false, dn: 'Scorched', dmgPm: 20, duration: 4000, soundPlayPerDmg: 'dmgpm' },
+    ],
+    loots: [mediumCoreLoot, fireslimeCoreLoot],
+}
+
+// black-marked - shadow magic (shadowbolt) and claws that drain you
+const morvane = {
+    ...standingWolfBase,
+    name: "morvane",
+    dn: "Morvane",
+    elementType: "dark",
+    weakness: "light",
+    aptitude: ['dark'],
+    skills: ['shadowbolt', 'blinkstrike'],
+    stats: { ...standingWolfBase.stats, dmg: 48, magDmg: 3, spd: 6.5 },
+    lvl: 25,
+    hp: 9500,
+    maxHp: 9500,
+    expToGain: 2100,
+    effects: [
+        { effectType: 'spdrain', chance: 15, permanent: false, dn: 'SP Drained', spcost: 30, hpcost: 0, mpcost: 0, hungercost: 4, energycost: 0 },
+    ],
+    loots: [mediumCoreLoot, darkslimeCoreLoot],
+}
+
+// frost-white - the pack's strongest: ice spikes (tidalspike) and the
+// heaviest blows; drops an icy celestine shard like the frost scorpion
+const skallgrim = {
+    ...standingWolfBase,
+    name: "skallgrim",
+    dn: "Skallgrim",
+    elementType: "water",
+    weakness: "fire",
+    aptitude: ['water'],
+    skills: ['tidalspike', 'blinkstrike'],
+    stats: { ...standingWolfBase.stats, dmg: 60, magDmg: 3, atkSpd: 2.6 },
+    lvl: 28,
+    hp: 11000,
+    maxHp: 11000,
+    expToGain: 2600,
+    loots: [mediumCoreLoot, celestineOreLoot],
+}
+
 function scatterPosition(areaType: string, half: number, minRadius: number, maxRadius: number) {
     let x: number, z: number
 
@@ -714,6 +915,18 @@ export function generateLesserDemons(total = 1, placeId = 1, areaSize = 300, are
 // same areaSize convention) as centerX/centerZ/areaSize.
 export function generateGhosts(total = 5, placeId = 1, areaSize = 10, areaType = "square", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
     return generateEnemies(ghostBase, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius)
+}
+
+export function generateStrayWolves(total = 5, placeId = 1, areaSize = 300, areaType = "village", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
+    return generateEnemies(strayWolfBase, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius)
+}
+
+// one of the four standing wolves by name ("vargoth", "zareth", "morvane",
+// "skallgrim") - each is a single named elite, so total defaults to 1 and
+// areaType to "fixed" (exactly at centerX, centerZ)
+const STANDING_WOLVES = { vargoth, zareth, morvane, skallgrim }
+export function generateStandingWolf(name: keyof typeof STANDING_WOLVES, total = 1, placeId = 1, areaSize = 300, areaType = "fixed", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
+    return generateEnemies(STANDING_WOLVES[name], total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius)
 }
 
 export function generateIceScorpions(total = 1, placeId = 1, areaSize = 10, areaType = "square", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {

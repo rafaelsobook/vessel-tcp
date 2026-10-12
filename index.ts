@@ -104,6 +104,9 @@ type Tplayers = {
     skills: any[],
     hasWeapon: boolean,
     weaponBlocking: boolean,
+    // worn out - low hp or stamina (client's characterstate.js
+    // isCharacterTired); arrives with join-world, updated by "emitTired"
+    isTired?: boolean,
     magicBlocking: boolean,
     IsInVulnerable: boolean,
     // bot-only for now - a real player's own hp lives entirely client-side
@@ -841,6 +844,18 @@ io.on("connection", (socket: Socket) => {
 
         player.weaponBlocking = isBlocking
         io.emit("emitted-weaponblock", data)
+    })
+    // a player wore out or recovered (client's characterstate.js
+    // refreshTiredness) - stored like weaponBlocking above so anyone joining
+    // later gets it in the players list, and relayed so everyone already here
+    // switches that player's walk/stand clips (client's sockets/renderer.js)
+    safeOn(socket, "emitTired", data => {
+        const { ownerId, isTired } = data
+        const player = players.find(user => user.owner === ownerId)
+        if(!player) return
+
+        player.isTired = !!isTired
+        io.emit("emitted-tired", data)
     })
     // client's charactersystem/seating.js - the sitter already sat down on
     // their own screen the moment they pressed interact (same act-first

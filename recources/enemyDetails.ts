@@ -2,7 +2,7 @@ import { randNumString } from "../tools/tools"
 import { simpleCoreLoot, mediumCoreLoot, waterslimeCoreLoot, fireslimeCoreLoot, electricslimeCoreLoot } from "./coreDetails"
 import { OPENWORLD_GRAVEYARDS, ghostsForGraveyard } from "./graveyards"
 import { DUNGEON_ENEMIES } from "./enemiesInDungeon"
-import { generateSlimes, generateFireSlimes, generateElectricSlimes, generateMonoliths, generateLesserDemons, generateDarkSlimes, generateForestDeer, generateJasferDeer, generateLuminaDeer, generateNightmareDeer, generateScorchDeer, generateWisfDeer, generateGhosts } from "../generate-datas/genenemy"
+import { generateSlimes, generateFireSlimes, generateElectricSlimes, generateMonoliths, generateLesserDemons, generateDarkSlimes, generateForestDeer, generateJasferDeer, generateLuminaDeer, generateNightmareDeer, generateScorchDeer, generateWisfDeer, generateGhosts, generateStrayWolves, generateStandingWolf } from "../generate-datas/genenemy"
 
 let monolithBodyHeight = 2
 
@@ -11,15 +11,15 @@ let monolithBodyHeight = 2
 // dynamically topped up on top of them) carries this same object on
 // .territory, a shared reference rather than a fresh copy per enemy.
 // Centered on infterrain's own SPAWN_X/SPAWN_Z (0, 500) - same center every
-// band below is already scattered around. maxDist (2600) matches
-// OPENWORLD_ENEMY_BANDS' own outermost band (forestdeer, ...-2600) exactly -
+// band below is already scattered around. maxDist (3400) matches
+// OPENWORLD_ENEMY_BANDS' own outermost band (straywolf, ...-3400) exactly -
 // see that table further down for the real per-type radius breakdown; kept
 // as its own separate constant here only because this whole object needs to
 // exist before withTerritory (right below) can reference it, and
 // withTerritory itself needs to exist before OPENWORLD_ENEMY_BANDS' own
 // static population uses it. Keep these two in sync if either end of the
 // outermost band ever changes.
-export const OPENWORLD_SLIME_TERRITORY = { center: { x: 0, y: 0, z: 500 }, minDist: 0, maxDist: 2600 }
+export const OPENWORLD_SLIME_TERRITORY = { center: { x: 0, y: 0, z: 500 }, minDist: 0, maxDist: 3400 }
 // applies OPENWORLD_SLIME_TERRITORY to every enemy a generator call
 // produced - .map() instead of baking .territory into the shared
 // slimeBase/fireSlimeBase/electricSlimeBase templates themselves
@@ -94,7 +94,7 @@ const enemyInterface = {
 // nearest-to-farthest, matching the intended difficulty progression a
 // player walking straight out from spawn should actually encounter:
 // waterslime -> fireslime -> electricslime -> orangelith -> darkslime ->
-// forestdeer. Bands are contiguous and non-overlapping by construction (each
+// forestdeer -> straywolf (the wild, far out - a big pack). Bands are contiguous and non-overlapping by construction (each
 // one's minDist is the previous one's maxDist) - keep them that way when
 // tuning, or two types end up sharing ground again.
 //
@@ -124,6 +124,7 @@ export const OPENWORLD_ENEMY_BANDS = [
     { generator: generateMonoliths,      name: "orangelith",    count: 5,  minDist: 850,  maxDist: 950 },
     { generator: generateDarkSlimes,     name: "darkslime",     count: 50, minDist: 950,  maxDist: 2000 },
     { generator: generateForestDeer,     name: "forestdeer",    count: 10, minDist: 2000, maxDist: 2600 },
+    { generator: generateStrayWolves,    name: "straywolf",     count: 40, minDist: 2600, maxDist: 3400 },
 ]
 
 export default [
@@ -277,6 +278,16 @@ export default [
     ...generateNightmareDeer(1, 1, 300, "fixed", 21.6, 130),
     ...generateScorchDeer(1, 1, 300, "fixed", 24.6, 130),
     ...generateWisfDeer(1, 1, 300, "fixed", 27.6, 130),
+    // and one stray wolf at the end of that row - respawns a minute after
+    // it's killed (strayWolfBase's respawnTime)
+    ...generateStrayWolves(1, 1, 300, "fixed", 30.6, 130),
+    // the four standing wolves (genenemy.ts's standingWolfBase) - a row of
+    // their own behind that one, 5 apart since they're 2.6 wide. Weakest
+    // to strongest left to right; each respawns a minute after it falls.
+    ...generateStandingWolf("vargoth",   1, 1, 300, "fixed", 5,  138),
+    ...generateStandingWolf("zareth",    1, 1, 300, "fixed", 10, 138),
+    ...generateStandingWolf("morvane",   1, 1, 300, "fixed", 15, 138),
+    ...generateStandingWolf("skallgrim", 1, 1, 300, "fixed", 20, 138),
     // graveyard ghosts (placeId 1, village) - localroomdb.js's graveYards
     // entry for this place: position (55, 10), areaSize 10. Same 0.8x
     // shrink-to-stay-inside-the-fence reasoning as the openworld graveyard

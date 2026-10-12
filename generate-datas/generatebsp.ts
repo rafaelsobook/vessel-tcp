@@ -7,7 +7,11 @@
 // ts-nocheck because it's untyped JS; it still compiles as-is.
 
 /**
- * bspDungeonGenerator.js  – v6
+ * bspDungeonGenerator.js  – v7
+ * Changes from v6:
+ *  - two doors (dungeon.doors): the entrance, on a solid wall of the entrance
+ *    room, and the exit, in the middle of the boss room's far wall - each a
+ *    roomPaths way out, its trigger in front of the door
  * Changes from v5:
  *  - BSP split can no longer produce undersized leaves (overlapping rooms,
  *    floor on the grid's outer edge)
@@ -614,6 +618,77 @@ function placeLights(rooms, wallH, bossElevation) {
     }));
 }
 
+// ─── Doors ─────────────────────────────────────────────────────────────────
+// The dungeon's two doors - createDungeon stands the door model in each. The
+// entrance, the way you came in, goes on the entrance room's longest stretch
+// of solid wall; the exit goes in the middle of the boss room's far wall,
+// straight across the hall from its staircase, past the boss. Both are ways
+// out (roomPaths).
+
+// The walk-up trigger in front of a door (its roomPaths entry - 2 units on a
+// side, areascene.js) has its middle this far out from the wall. The door
+// model stands against the wall well under a unit deep, so walking up to it
+// always puts you inside the trigger.
+const DOOR_TRIGGER_OUT = 1.6;
+
+// Where a door goes on one side of a room (a roomSides entry): the middle of
+// the side's longest unbroken run of wall. Returns { dx, dz, run, cells, front }
+// - dx/dz: the way the door faces, into the room; run: that stretch's length
+// in cells; cells: the wall cell(s) the door's middle stands against (two when
+// it falls on the line between them); front: the room cells right in front of
+// those - or null if the side has no wall at all.
+function doorSpot(grid, side) {
+    let best = null, run = null;
+    side.cells.forEach((c, i) => {
+        if (get(grid, c.x, c.y) !== T_WALL) { run = null; return; }
+        if (!run) run = { from: i, to: i };
+        run.to = i;
+        if (!best || run.to - run.from > best.to - best.from) best = { ...run };
+    });
+    if (!best) return null;
+    const mid   = (best.from + best.to) / 2;
+    const cells = side.cells.slice(Math.floor(mid), Math.ceil(mid) + 1);
+    return {
+        dx: side.dx, dz: side.dz,
+        run: best.to - best.from + 1,
+        cells,
+        front: cells.map(c => ({ x: c.x + side.dx, y: c.y + side.dz })),
+    };
+}
+
+// The entrance door's spot - the entrance room's longest run of wall; on a
+// tie, the side across from the most openings, so the door has the room and
+// the way on in front of it.
+function entranceDoorSpot(grid, room) {
+    const sides = roomSides(room);
+    const openingsAcross = s => sides.find(o => o.dx === -s.dx && o.dz === -s.dz)
+        .cells.filter(c => get(grid, c.x, c.y) !== T_WALL).length;
+    let best = null;
+    for (const side of sides) {
+        const spot = doorSpot(grid, side);
+        if (!spot) continue;
+        const score = spot.run * 1000 + openingsAcross(side);
+        if (!best || score > best.score) best = { spot, score };
+    }
+    return best?.spot ?? null;
+}
+
+// A door in world units: x/z the middle of its foot, on the wall face; y the
+// floor under it; dx/dz the way it faces (into the room). id/kind for createDungeon.
+function doorAt(id, kind, spot, cs, floorY) {
+    const { dx, dz, cells } = spot;
+    const along = cells.reduce((sum, c) => sum + (dx !== 0 ? c.y : c.x) + 0.5, 0) / cells.length * cs;
+    const face  = dx !== 0 ? (cells[0].x + (dx > 0 ? 1 : 0)) * cs : (cells[0].y + (dz > 0 ? 1 : 0)) * cs;
+    return {
+        id, kind, dx, dz,
+        x: dx !== 0 ? face : along,
+        y: floorY,
+        z: dx !== 0 ? along : face,
+        cells,
+        front: spot.front,
+    };
+}
+
 // ─── Nature: river, vases, ore, grass ──────────────────────────────────────
 // All of it rolls on its OWN rng (seed + 2) and runs once the layout, props and
 // slabs are final, so it never moves any of them - a dungeon comes out exactly
@@ -892,20 +967,34 @@ export function generateBSPDungeon({
         }
     }
 
+    // ── Doors ──────────────────────────────────────────────────────────────
+    // The entrance on the entrance room's longest run of wall; the exit in the
+    // middle of the boss room's far wall, on its dais - the side across from
+    // its entrance, all wall now that every other opening is closed. No way
+    // into the boss room, no exit door - the entrance is then the way out.
+    const entranceSpot = entranceDoorSpot(grid, leaves[0].room);
+    const farSide = bossEntrance && roomSides(bossRoom).find(s => s.dx === -bossEntrance.dx && s.dz === -bossEntrance.dz);
+    const exitSpot = farSide ? doorSpot(grid, farSide) : null;
+    const doors = [
+        entranceSpot && doorAt("door_entrance", "entrance", entranceSpot, cellSize, 0),
+        exitSpot && doorAt("door_exit", "exit", exitSpot, cellSize, elevation),
+    ].filter(Boolean);
+    // where you arrive, and where you walk up to the way back out
+    const keepClear = [{ x: spawnGX, y: spawnGZ }, ...(entranceSpot?.front ?? [])];
+
     const props  = placeProps(rooms, grid, rng, spawnGX, spawnGZ);
     const lights = placeLights(rooms, wallHeight, elevation);
-    const rocks = placeRocks(rooms, grid, rng, spawnGX, spawnGZ, rockDensity, cellSize,
-        [{ x: spawnGX, y: spawnGZ }, { x: entranceRoom.bounds.x, y: entranceRoom.bounds.y }]);
+    const rocks = placeRocks(rooms, grid, rng, spawnGX, spawnGZ, rockDensity, cellSize, keepClear);
 
     // ── Tile height jitter ─────────────────────────────────────────────────
     // A SEPARATE rng is seeded from the same seed so the jitter pass never
     // affects the corridor/room generation above (those already consumed rng).
     // Using seed+1 gives a fully independent sequence.
-    // No raised slab on or next to (diagonals too) the spawn cell or the exit
-    // door's cell - the entrance room's corner, see roomPaths - so you never
-    // arrive boxed in or have a slab in front of the way out.
+    // No raised slab on or next to (diagonals too) the spawn cell or the cells
+    // in front of the entrance door, so you never arrive boxed in or have a
+    // slab in front of the way out. (The boss room never gets one.)
     const protectedCells = new Set();
-    for (const [cx, cz] of [[spawnGX, spawnGZ], [entranceRoom.bounds.x, entranceRoom.bounds.y]])
+    for (const { x: cx, y: cz } of keepClear)
         for (let oz = -1; oz <= 1; oz++)
             for (let ox = -1; ox <= 1; ox++) protectedCells.add(cellKey(cx + ox, cz + oz));
     const jitterRng    = seededRNG(seed + 1);
@@ -938,23 +1027,24 @@ export function generateBSPDungeon({
         rotation: 0,
     };
 
-    // The way back out - a roomPaths door (areascene.js turns every entry
-    // into an interact trigger) on the entrance room's own corner cell, in
-    // world units unlike spawn above. Room cells are always floor and
-    // placeRocks/props/raised slabs never use a room's edge row/column, so
-    // nothing can block it; rooms are at least 4 cells wide, so it's always
-    // 1.5+ cells from the spawn point instead of the player arriving inside
-    // the trigger.
-    const roomPaths = exitPlaceDetail ? [{
+    // The ways out - a roomPaths door (areascene.js turns every entry into an
+    // interact trigger) in front of each of the doors, both to exitPlaceDetail,
+    // in world units unlike spawn above: DOOR_TRIGGER_OUT out from the wall,
+    // its middle 1 above the floor there (the dais, for the exit). A door's
+    // front cells are on its room's edge row/column, which placeRocks/props/
+    // raised slabs never use, so nothing can block it; the spawn, in the
+    // middle of a room at least 4 cells wide, is always 1.5+ cells from every
+    // wall - well clear of the entrance's trigger.
+    const roomPaths = exitPlaceDetail ? doors.map(door => ({
+        // a real door now - it creaks open as you go through (areascene.js)
+        doorSound: true,
         ...exitPlaceDetail,
         pos: {
-            x: entranceRoom.bounds.x * cellSize + cellSize / 2,
-            // 1 above the floor surface - areascene.js re-lifts it by
-            // createDungeon's floorTopY, in case the floor isn't at y 0
-            y: 1,
-            z: entranceRoom.bounds.y * cellSize + cellSize / 2,
+            x: door.x + door.dx * DOOR_TRIGGER_OUT,
+            y: door.y + 1,
+            z: door.z + door.dz * DOOR_TRIGGER_OUT,
         },
-    }] : [];
+    })) : [];
 
     return {
         isMultiplayer,
@@ -976,7 +1066,11 @@ export function generateBSPDungeon({
         // normal floor Y - createDungeon puts each tile's top surface at
         // (dais elevation) + dungeon.tileHeights[`${gx}_${gz}`]
         tileHeights,
-        doors:  [],
+        // [{ id, kind: "entrance" | "exit", x, y, z, dx, dz, cells, front }] -
+        // x/z: the middle of the door's foot on the wall face, y: the floor
+        // there (world units); dx/dz: the way it faces, into its room; cells:
+        // the wall cell(s) behind its middle, front: the room cells before them
+        doors,
         // vases included (placeNature) - type "vase"
         props,
         rocks,
