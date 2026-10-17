@@ -2,7 +2,7 @@ import { randNumString } from "../tools/tools"
 import { simpleCoreLoot, mediumCoreLoot, waterslimeCoreLoot, fireslimeCoreLoot, electricslimeCoreLoot } from "./coreDetails"
 import { OPENWORLD_GRAVEYARDS, ghostsForGraveyard } from "./graveyards"
 import { DUNGEON_ENEMIES } from "./enemiesInDungeon"
-import { generateSlimes, generateFireSlimes, generateElectricSlimes, generateMonoliths, generateLesserDemons, generateDarkSlimes, generateForestDeer, generateJasferDeer, generateLuminaDeer, generateNightmareDeer, generateScorchDeer, generateWisfDeer, generateGhosts, generateStrayWolves, generateStandingWolf } from "../generate-datas/genenemy"
+import { generateSlimes, generateFireSlimes, generateElectricSlimes, generateMonoliths, generateLesserDemons, generateDarkSlimes, generateWildDeer, generateGhosts, generateStrayWolves, generateStandingWolf } from "../generate-datas/genenemy"
 
 let monolithBodyHeight = 2
 
@@ -94,7 +94,7 @@ const enemyInterface = {
 // nearest-to-farthest, matching the intended difficulty progression a
 // player walking straight out from spawn should actually encounter:
 // waterslime -> fireslime -> electricslime -> orangelith -> darkslime ->
-// forestdeer -> straywolf (the wild, far out - a big pack). Bands are contiguous and non-overlapping by construction (each
+// deer (all six coats) -> straywolf (the wild, far out - a big pack). Bands are contiguous and non-overlapping by construction (each
 // one's minDist is the previous one's maxDist) - keep them that way when
 // tuning, or two types end up sharing ground again.
 //
@@ -123,7 +123,7 @@ export const OPENWORLD_ENEMY_BANDS = [
     { generator: generateElectricSlimes, name: "electricslime", count: 50, minDist: 450,  maxDist: 850 },
     { generator: generateMonoliths,      name: "orangelith",    count: 5,  minDist: 850,  maxDist: 950 },
     { generator: generateDarkSlimes,     name: "darkslime",     count: 50, minDist: 950,  maxDist: 2000 },
-    { generator: generateForestDeer,     name: "forestdeer",    count: 10, minDist: 2000, maxDist: 2600 },
+    { generator: generateWildDeer,       name: "deer",          count: 18, minDist: 2000, maxDist: 2600 },
     { generator: generateStrayWolves,    name: "straywolf",     count: 40, minDist: 2600, maxDist: 3400 },
 ]
 
@@ -137,7 +137,7 @@ export default [
     // whole area upfront - see client/src/sockets/renderer.js's own
     // OPENWORLD_PLACE_ID distance-based mesh hiding for how the client keeps
     // this affordable regardless of how many end up alive at once), 5/10 for
-    // the two rarer/tougher single-type bands (orangelith/forestdeer).
+    // the two rarer/tougher single-type bands (orangelith/deer).
     ...OPENWORLD_ENEMY_BANDS.flatMap(band =>
         withTerritory(band.generator(band.count, 888, band.maxDist * 2, "ring", 0, 500, band.minDist, band.maxDist))
     ),
@@ -153,6 +153,17 @@ export default [
     ...OPENWORLD_GRAVEYARDS.flatMap(plot =>
         generateGhosts(ghostsForGraveyard(plot.areaSize), 888, plot.areaSize * 0.8, "square", plot.position.x, plot.position.z)
     ),
+    // the four standing wolves (genenemy.ts's standingWolfBase) - far too
+    // strong for the village, so they live out in the stray wolves' band
+    // (2600-3400 from the openworld centre (0, 500)), one to a direction,
+    // the stronger the farther out: Vargoth NE ~2700, Zareth S ~2900,
+    // Morvane SW ~3100, Skallgrim NW ~3300. Each spot was picked off the real
+    // terrain - dry (above the river/water level) and flat for a few units
+    // around.
+    ...generateStandingWolf("vargoth",   1, 888, 300, "fixed", 1350,  2838),
+    ...generateStandingWolf("zareth",    1, 888, 300, "fixed", 751,  -2301),
+    ...generateStandingWolf("morvane",   1, 888, 300, "fixed", -2192, -1692),
+    ...generateStandingWolf("skallgrim", 1, 888, 300, "fixed", -2858, 2150),
     // single lesserdemon - removed for now (was at (85, 585), ~120 units
     // from the true openworld center (0, 500), inside waterslime's own
     // 100-150 band - see git history/prior comment here for the full
@@ -263,31 +274,9 @@ export default [
         expToGain: 500,
         // deathSound: "slimedeath",
     },
-    // one of each deer texture variant, village (placeId 1) - "fixed"
-    // areaType lands each exactly at (centerX, centerZ) with no scatter,
-    // same pattern generateLesserDemons(1, 888, ...) uses for its own single
-    // openworld spawn. Continues the waterslime/fireslime/electricslime row
-    // above (3.6/6.6/9.6 along x) in the same 3-unit spacing, purely so all
-    // 6 are lined up and easy to walk down and look at - genenemy.ts's own
-    // jasferDeer/luminaDeer/nightmareDeer/scorchDeer/wisfDeer bases already
-    // carry their own real stats/loot/effects (recolors of forestDeer), no
-    // need to redeclare them here.
-    ...generateForestDeer(1, 1, 300, "fixed", 12.6, 130),
-    ...generateJasferDeer(1, 1, 300, "fixed", 15.6, 130),
-    ...generateLuminaDeer(1, 1, 300, "fixed", 18.6, 130),
-    ...generateNightmareDeer(1, 1, 300, "fixed", 21.6, 130),
-    ...generateScorchDeer(1, 1, 300, "fixed", 24.6, 130),
-    ...generateWisfDeer(1, 1, 300, "fixed", 27.6, 130),
-    // and one stray wolf at the end of that row - respawns a minute after
-    // it's killed (strayWolfBase's respawnTime)
-    ...generateStrayWolves(1, 1, 300, "fixed", 30.6, 130),
-    // the four standing wolves (genenemy.ts's standingWolfBase) - a row of
-    // their own behind that one, 5 apart since they're 2.6 wide. Weakest
-    // to strongest left to right; each respawns a minute after it falls.
-    ...generateStandingWolf("vargoth",   1, 1, 300, "fixed", 5,  138),
-    ...generateStandingWolf("zareth",    1, 1, 300, "fixed", 10, 138),
-    ...generateStandingWolf("morvane",   1, 1, 300, "fixed", 15, 138),
-    ...generateStandingWolf("skallgrim", 1, 1, 300, "fixed", 20, 138),
+    // the deer and the stray wolf that ended this row live in the openworld
+    // now (OPENWORLD_ENEMY_BANDS - all six deer coats mixed, genenemy.ts's
+    // generateWildDeer; the wolves out past them, hunting in packs)
     // graveyard ghosts (placeId 1, village) - localroomdb.js's graveYards
     // entry for this place: position (55, 10), areaSize 10. Same 0.8x
     // shrink-to-stay-inside-the-fence reasoning as the openworld graveyard

@@ -90,6 +90,26 @@ export const darkslimeCoreLoot = {
     rarity: "normal"
 }
 
+// the orange lith's own core (genenemy.ts's monolithBase) - its icon,
+// images/items/crafting/orangelithcore.webp, was already in the client
+export const orangelithCoreLoot = {
+    itemId: randNumString(),
+    name: "orangelithcore",
+    dn: "orange lith core",
+    itemCateg: "crafting",
+    itemType: "core",
+    weaponType: false,
+    equipAbilities: {
+        dmg: 10, def: 10, magicDmg: 10, plusStr: 0, plusDex: 0, plusInt: 0,
+        plusDurability: 30
+    },
+    equiped: false,
+    price: { coinType: "bronze", pieces: 60 },
+    qnty: 1,
+    desc: "a heavy, ember-veined core broken out of an orange lith, useful for enhancing items",
+    rarity: "normal"
+}
+
 export const mediumCoreLoot = {
     itemId: randNumString(),
     name: "mediumcore",

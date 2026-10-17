@@ -19,6 +19,7 @@ import { rollBotLevelReward, botTypeFor, botDamageAfterArmor } from "./recources
 import { getWeather, getWeatherState, rollWeather, setWeather, WEATHER_ROLL_INTERVAL_MS } from "./recources/weather"
 import { getDayNightState, setTimeOfDay, DAY_NIGHT_SYNC_INTERVAL_MS } from "./recources/dayNight"
 import { faker } from "@faker-js/faker"
+import { isNearCastle } from "./recources/castles"
 
 export const enemyLengthsInPlace = [
     {   
@@ -107,6 +108,12 @@ type Tplayers = {
     // worn out - low hp or stamina (client's characterstate.js
     // isCharacterTired); arrives with join-world, updated by "emitTired"
     isTired?: boolean,
+    // bleeding (client's characterstate.js refreshBleeding) - same as
+    // isTired: arrives with join-world, updated by "emitBleeding"
+    isBleeding?: boolean,
+    // how strong their flex aura looks (client's effects/auraProfile.js) -
+    // arrives with join-world, kept current by "activate-skill" and "emitAura"
+    aura?: { power: number, darkness: number },
     magicBlocking: boolean,
     IsInVulnerable: boolean,
     // bot-only for now - a real player's own hp lives entirely client-side
@@ -347,6 +354,43 @@ function logEnemyKill(enemyTarg: any, killerId: string){
     log(`[kill] ${enemyName} killed by ${killer.name} lvl ${killer.lvl} (${kind})`)
 }
 
+// A killed enemy comes back - fresh, where it first stood (origPos) -
+// respawnDetails.respawnTime later. Run here, on the server, the moment
+// applyDamageToEnemy sees it die, whoever or whatever killed it (a player, a
+// bot, a burn tick, its own curse): it used to hang off the killer's client
+// emitting "respawnEnemy" with its own copy of the enemy, which had been
+// commented out (createEnemy.js's defeatedAmonster), so nothing came back
+// until a restart. Enemies with willRespawn false - the openworld's
+// topped-up extras - don't; the top-up replaces them on its own.
+// picked grain and mushrooms grow back where they were, this long after
+const GRAIN_REGROW_MS = 5 * 60 * 1000
+const MUSHROOM_REGROW_MS = 10 * 60 * 1000
+
+function respawnLater(dead: any){
+    const details = dead.respawnDetails
+    if(!details || details.willRespawn === false) return
+    const origin = dead.origPos ?? { x: dead.x, y: dead.y, z: dead.z }
+    setTimeout(() => {
+        tcpEnemies.push({
+            ...dead,
+            _id: randNumString(),
+            hp: dead.maxHp,
+            x: origin.x,
+            y: origin.y ?? dead.y,
+            z: origin.z,
+            _isMoving: false,
+            _targetId: false,
+            _dirTarg: { x: 0, y: 0, z: 0 },
+            _attacking: false,
+            _disabled: false,
+            _cursed: false,
+            _eatingUntil: 0,
+            _dodgeCooldownUntil: 0,
+        })
+        io.emit("enemy-respawned", tcpEnemies)
+    }, details.respawnTime)
+}
+
 // the ONE place enemy hp actually gets mutated - originally inline inside
 // the "enemyIsHit" socket handler below, pulled out so recources/npcBrain.ts's
 // own bot combat (BOT PLAYERS block further down) can deal REAL damage
@@ -374,7 +418,7 @@ function applyDamageToEnemy(data: any): boolean {
     // shapes land here). Consumed below by physicalImmune (genenemy.ts's
     // ghostBase) - the only per-enemy physical/magic distinction so far; no
     // enemy has a def field at all.
-    const { isPhysicalDmg, physicalDmg, weaponDmg, magicDmg, accuracy, isCritical, weaponType } = dmgDetails
+    const { isPhysicalDmg, isPurify, physicalDmg, weaponDmg, magicDmg, accuracy, isCritical, weaponType } = dmgDetails
     const enemyTarg = tcpEnemies.find(ene => ene._id === targetId)
     if(!enemyTarg){
         // same shape "removeEnemy"'s own handler already broadcasts
@@ -402,13 +446,20 @@ function applyDamageToEnemy(data: any): boolean {
     // tcpEnemies declare this field, same reason the openworld top-up
     // below already reaches for (newSlime as any).territory.
     const isImmune = !!isPhysicalDmg && !!(enemyTarg as any).physicalImmune
-    const dmgToApply = isImmune ? 0 : (weaponDmg ? weaponDmg : physicalDmg)
+    // the Purification skill (client skillEffects.js's spawnPurificationCircle)
+    // sends isPurify with no damage of its own - a purifiable enemy (ghosts,
+    // genenemy.ts) takes exactly its remaining hp, decided here rather than
+    // by the client, so a purify hit can't be stretched onto anything else
+    const dmgToApply = isImmune ? 0
+        : isPurify ? ((enemyTarg as any).purifiable ? Math.max(0, enemyTarg.hp) : 0)
+        : (weaponDmg ? weaponDmg : physicalDmg)
 
     enemyTarg.hp -= dmgToApply
     const isLethal = enemyTarg.hp <= 0
     if(isLethal){
         tcpEnemies = tcpEnemies.filter(enemy => enemy._id !== targetId)
         logEnemyKill(enemyTarg, data.playerId)
+        respawnLater(enemyTarg)
     }
     // {...data, ...} is what carries a hit weapon's own effectsWhenHit
     // (client's characterstate.js dealDamageToEnemy, e.g. the Majestic
@@ -857,6 +908,28 @@ io.on("connection", (socket: Socket) => {
         player.isTired = !!isTired
         io.emit("emitted-tired", data)
     })
+    // a player started or stopped bleeding (client's characterstate.js
+    // refreshBleeding) - stored and relayed exactly like emitTired above, so
+    // everyone switches that player's blood splatter on or off
+    safeOn(socket, "emitBleeding", data => {
+        const { ownerId, isBleeding } = data
+        const player = players.find(user => user.owner === ownerId)
+        if(!player) return
+
+        player.isBleeding = !!isBleeding
+        io.emit("emitted-bleeding", data)
+    })
+    // a player's flex aura grew while it was up (client's characterstate.js
+    // refreshMyAura) - stored and relayed like emitBleeding above, so everyone
+    // redraws it at its new strength
+    safeOn(socket, "emitAura", data => {
+        const { ownerId, aura } = data
+        const player = players.find(user => user.owner === ownerId)
+        if(!player || !aura) return
+
+        player.aura = aura
+        io.emit("emitted-aura", data)
+    })
     // client's charactersystem/seating.js - the sitter already sat down on
     // their own screen the moment they pressed interact (same act-first
     // trust level as everything else here). This is only where two players
@@ -971,6 +1044,8 @@ io.on("connection", (socket: Socket) => {
                 player.skills.forEach((skl: any) => {
                     if(skl.name === skill.name) skl.isActive = skill.isActive
                 })
+                // its strength, for anyone who joins while it's up
+                if(data.aura) player.aura = data.aura
                 break
             default:
                 break
@@ -1170,23 +1245,8 @@ io.on("connection", (socket: Socket) => {
         })
         io.emit("enemy-changedtarget", data)
     })
-    safeOn(socket, "respawnEnemy", data => {
-        const {maxHp, name, respawnDetails} = data
-        if(respawnDetails.willRespawn === false) return
-        data._id = randNumString()
-        setTimeout(() => {
-            tcpEnemies.push({...data,
-                hp: maxHp,
-                _isMoving: false,
-                _targetId: undefined,
-                _dirTarg: {x:0,z:0},
-                _attacking: false,
-                _disabled: false,
-                _cursed: false,
-            })
-            io.emit("enemy-respawned", tcpEnemies)
-        }, respawnDetails.respawnTime)
-    })
+    // (respawning is the server's own job now - respawnLater, called when an
+    // enemy dies in applyDamageToEnemy - not a client's "respawnEnemy")
     safeOn(socket, "removeEnemy", enemyId => {
         tcpEnemies = tcpEnemies.filter(enemy => enemy._id !== enemyId)
         console.log("enemy removed ", enemyId)
@@ -1211,10 +1271,18 @@ io.on("connection", (socket: Socket) => {
         io.emit("treasure-removed", treasureId)
     })
     // client's creategrain.js on pickup - same idempotent filter + bare
-    // io.emit shape as removeTreasure right above
+    // io.emit shape as removeTreasure right above. It grows back where it was
+    // (GRAIN_REGROW_MS) - only the pickup that actually found it starts that,
+    // so a double pickup can't grow two
     safeOn(socket, "pickupGrain", grainId => {
+        const picked = grains.find(grain => grain.grainId === grainId)
         grains = grains.filter(grain => grain.grainId !== grainId)
         io.emit("grain-removed", grainId)
+        if (picked) setTimeout(() => {
+            const grain = { ...picked, grainId: randNumString() }
+            grains.push(grain)
+            io.emit("grain-added", grain)
+        }, GRAIN_REGROW_MS)
     })
     // client's createmushroom.js on pickup - removed for everyone like
     // "pickupGrain" right above, but the ITEM comes from here: the server is
@@ -1227,6 +1295,12 @@ io.on("connection", (socket: Socket) => {
         io.emit("mushroom-removed", mushroomId)
         const item = picked && mushroomKind(picked.kind)?.item()
         if (item) socket.emit("mushroom-picked", { mushroomId, item })
+        // grows back where it was, the same kind - like a picked grain above
+        if (picked) setTimeout(() => {
+            const mushroom = { ...picked, mushroomId: randNumString() }
+            mushrooms.push(mushroom)
+            io.emit("mushroom-added", mushroom)
+        }, MUSHROOM_REGROW_MS)
     })
     safeOn(socket, "enemyWillAttack", data => {
         const { pos } = data
@@ -2808,6 +2882,115 @@ const SLIME_SPAWN_NEARBY_RADIUS = 40
 // emitLoc/emitmove/emitStop overwrites it with the client's own mode). A bot is
 // resting while napping (currentMood "rest", see its goalInterval). Slimes
 // already in the area are left alone - this only stops new ones spawning.
+// WEREWOLF HUNTS - the four standing wolves (genenemy.ts, placed far out in
+// the openworld's wolf band by enemyDetails.ts) are near impossible to
+// stumble on, so they come to you instead: a real player who goes
+// HUNT_START_DIST or more from the openworld's start is hunted by the
+// nearest standing wolf that isn't busy. Enemies are only moved by the
+// clients (renderer.js), and only ones built near a player, so a far-off wolf
+// can't simply be sent running from its lair - it's brought in to
+// HUNT_APPEAR_DIST from them instead: inside the 300 their client builds
+// openworld enemies within (worldsocket.js), past the ~180 it shows them
+// within (renderer.js), so it comes running in out of the distance rather
+// than popping up. One already that close just turns on them. Its target
+// being set is what plays its roar (worldsocket.js), and the hunted player
+// is told ("being-hunted") - that roar is too far off for them to hear.
+//
+// A hunt ends when the player heads back in past HUNT_GIVE_UP_DIST, leaves
+// the openworld or disconnects, or the wolf loses them (killed, or released
+// by the target sweep below). The wolf gives up, and if nobody's near enough
+// to see it go it's back at its lair at once - the idle wander walks it home
+// otherwise.
+const STANDING_WOLF_NAMES = ["vargoth", "zareth", "morvane", "skallgrim"]
+// infterrain's SPAWN_X/SPAWN_Z - the openworld's starting point
+const OPENWORLD_START = { x: 0, z: 500 }
+const HUNT_START_DIST = 3000
+const HUNT_GIVE_UP_DIST = 2800
+const HUNT_APPEAR_DIST = 220
+// a player this close to a wolf could see it vanish if it were sent home
+const HUNT_SEEN_DIST = 300
+const HUNT_CHECK_MS = 2000
+const hunts = new Map<string, string>()   // wolf name -> owner of the player it's hunting
+
+const distFromStart = (pos: { x: number, z: number }) => Math.hypot(pos.x - OPENWORLD_START.x, pos.z - OPENWORLD_START.z)
+const isStandingWolf = (enem: any) => enem.currentPlaceId === 888 && STANDING_WOLF_NAMES.includes(enem.name)
+
+function startHunt(wolf: any, prey: Tplayers){
+    hunts.set(wolf.name, prey.owner)
+    const pos = prey.pos!
+    if(Math.hypot(wolf.x - pos.x, wolf.z - pos.z) > HUNT_APPEAR_DIST){
+        // in from the side its lair is on, turned until it's clear of any castle
+        let angle = Math.atan2(wolf.z - pos.z, wolf.x - pos.x)
+        let x = pos.x + Math.cos(angle) * HUNT_APPEAR_DIST
+        let z = pos.z + Math.sin(angle) * HUNT_APPEAR_DIST
+        for(let tries = 0; isNearCastle(x, z, 10) && tries < 12; tries++){
+            angle += Math.PI / 6
+            x = pos.x + Math.cos(angle) * HUNT_APPEAR_DIST
+            z = pos.z + Math.sin(angle) * HUNT_APPEAR_DIST
+        }
+        wolf.x = x
+        wolf.z = z
+        wolf._eatingUntil = 0
+        io.emit("enemy-teleported", { _id: wolf._id, currentPlaceId: 888, x, z })
+    }
+    wolf._isMoving = true
+    wolf._attacking = false
+    // broadcasts every enemy - its roar on clients that have it, and where it
+    // now is (already chasing) for those that build it from here
+    registerTargetIfNone(wolf._id, prey.owner, { x: pos.x, y: 0, z: pos.z })
+    io.emit("enemy-chasing", { currentPlaceId: 888, _id: wolf._id, targetId: prey.owner, actionType: wolf.actionType })
+    io.to(prey.socketId).emit("being-hunted", { name: wolf.dn ?? wolf.name })
+    log(`[hunt] ${wolf.dn} hunts ${prey.name}`)
+}
+
+function callOffHunt(wolf: any, owner: string){
+    if(wolf._targetId === owner){
+        wolf._targetId = false
+        wolf._isMoving = false
+        wolf._attacking = false
+    }
+    const seen = players.some(pl => pl.currentPlace?.placeId === 888 && pl.pos && Math.hypot(pl.pos.x - wolf.x, pl.pos.z - wolf.z) < HUNT_SEEN_DIST)
+    if(!wolf._targetId && !seen && wolf.origPos){
+        wolf.x = wolf.origPos.x
+        wolf.z = wolf.origPos.z
+        io.emit("enemy-teleported", { _id: wolf._id, currentPlaceId: 888, x: wolf.x, z: wolf.z })
+    }
+    io.emit("registered-playerAsEnemy", tcpEnemies)
+}
+
+setInterval(() => {
+    // hunts that are over
+    hunts.forEach((owner, wolfName) => {
+        const wolf = tcpEnemies.find(enem => isStandingWolf(enem) && enem.name === wolfName)
+        const prey = players.find(pl => pl.owner === owner)
+        const stillOn = wolf && wolf._targetId === owner
+            && prey?.pos && prey.currentPlace?.placeId === 888 && distFromStart(prey.pos) >= HUNT_GIVE_UP_DIST
+        if(stillOn) return
+        hunts.delete(wolfName)
+        if(wolf) callOffHunt(wolf, owner)
+    })
+    // and new ones
+    players.forEach(pl => {
+        if(pl.currentPlace?.placeId !== 888 || !pl.pos) return
+        if(bots.some(b => b.player.owner === pl.owner)) return
+        if(distFromStart(pl.pos) < HUNT_START_DIST) return
+        if([...hunts.values()].includes(pl.owner)) return
+        const wolves = tcpEnemies.filter(isStandingWolf)
+        // one that already spotted them on its own counts as their hunter
+        const onThem = wolves.find(enem => enem._targetId === pl.owner)
+        if(onThem){
+            hunts.set(onThem.name, pl.owner)
+            return
+        }
+        const free = wolves.filter(enem => !enem._targetId && !hunts.has(enem.name))
+        if(!free.length) return
+        const pos = pl.pos
+        const nearest = free.reduce((best, enem) =>
+            Math.hypot(enem.x - pos.x, enem.z - pos.z) < Math.hypot(best.x - pos.x, best.z - pos.z) ? enem : best)
+        startHunt(nearest, pl)
+    })
+}, HUNT_CHECK_MS)
+
 function isPlayerResting(player: Tplayers){
     return !!player.seat || player.currentMood === "rest"
 }

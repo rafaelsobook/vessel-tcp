@@ -1,5 +1,11 @@
 import { randNumString } from "../tools/tools"
-import { simpleCoreLoot, mediumCoreLoot, waterslimeCoreLoot, fireslimeCoreLoot, electricslimeCoreLoot, darkslimeCoreLoot, celestineOreLoot } from "../recources/coreDetails"
+import { simpleCoreLoot, mediumCoreLoot, waterslimeCoreLoot, fireslimeCoreLoot, electricslimeCoreLoot, darkslimeCoreLoot, celestineOreLoot, orangelithCoreLoot } from "../recources/coreDetails"
+import { isNearCastle } from "../recources/castles"
+import { beastMeatLoot } from "../recources/meatLoots"
+
+// clear ground kept around each openworld castle when placing enemies - see
+// generateEnemies
+const CASTLE_SPAWN_MARGIN = 10
 
 const slimeBase = {
     maxDistance: 0.5,
@@ -222,7 +228,8 @@ const monolithBase = {
     weaponBlocking: false,
     magicBlocking: false,
     IsInVulnerable: false,
-    loots: [simpleCoreLoot],
+    // its own core now, not the generic small one (coreDetails.ts)
+    loots: [orangelithCoreLoot],
     respawnDetails: {
         willRespawn: true,
         respawnTime: 30 * 1000,
@@ -297,9 +304,9 @@ const forestDeer = {
     IsInVulnerable: false,
     // required - createEnemy.js's own death handler does `loots.length` with
     // no guard, so an enemy base missing this crashes the client on death.
-    // simpleCoreLoot, not mediumCoreLoot, to match its lvl/hp tier (monolith
-    // lvl10/hp5700 and lesserdemon lvl30/hp12000 both use simpleCoreLoot too -
-    // mediumCoreLoot is reserved for woodbane, a much bigger hp26700 enemy)
+    // simpleCoreLoot, not mediumCoreLoot, to match its lvl/hp tier (lesserdemon
+    // lvl30/hp12000 uses simpleCoreLoot too - mediumCoreLoot is reserved for
+    // much bigger enemies)
     loots: [simpleCoreLoot],
     respawnDetails: {
         willRespawn: true,
@@ -433,6 +440,11 @@ const ghostBase = {
     // (createEnemy.js's enemyIsHit). Skills and burn ticks still land
     // normally - they never set isPhysicalDmg.
     physicalImmune: true,
+    // the Purification skill destroys it outright - applyDamageToEnemy
+    // (tcp/index.ts) turns a dmgDetails.isPurify hit into its full remaining
+    // hp. Only enemies with this flag; anything else a purify hit lands on
+    // takes nothing.
+    purifiable: true,
     stats: {
         dmg: 10,
         // was 16 - fireEnemySkillProjectile scales an enemy's spell by
@@ -593,6 +605,13 @@ const strayWolfBase = {
     maxDistance: 0.8,
     name: "straywolf",
     dn: "Stray Wolf",
+    // a hunter, not a grazer - sees you coming from this far off and runs
+    // you down (createEnemy.js's det.detectRange poll, same as the standing
+    // wolves; no roar clip, so it just comes)
+    detectRange: 20,
+    // and hunts as a pack: once one of them is after you, every other stray
+    // wolf within this far of it joins in (createEnemy.js, same poll)
+    packRange: 25,
     modelStyle: "wolf",
     elementType: "none",
     weakness: "fire",
@@ -645,7 +664,7 @@ const strayWolfBase = {
 // standing wolves - modelStyle "standingwolf" (models/monsters/standingwolf.glb),
 // four named werewolves on ONE rig: each one's `name` picks its skin
 // (images/textures/enemy/standingwolf/<name>.jpg, createMonsterMaterial's
-// convention), and its element, skill and loot follow that skin. The village's
+// convention), and its element and loot follow that skin. The village's
 // elites, in rising order: Vargoth (plain brown - the brawler, pounces),
 // Zareth (crimson, ember-veined - fire), Morvane (black-marked - dark) and
 // Skallgrim (frost-white - the strongest).
@@ -655,11 +674,25 @@ const strayWolfBase = {
 // added a standing wolf glides after you in its idle pose and vanishes on
 // death without a death animation. Add the clips under those names and they
 // play with no code change.
+//
+// Their claws make you bleed - client's characterstate.js tickBleed: 2% of
+// max hp every second, lethal, until a cure lifts it (Purification, the
+// healing circle, Vesper). Every wolf below keeps it, including the ones with
+// their own effects list. Costs all 0 - the drain is the tick, not the hit.
+const bleedEffect = { effectType: 'bleed', chance: 25, permanent: true, dn: 'Bleeding', spcost: 0, hpcost: 0, mpcost: 0, hungercost: 0, energycost: 0 }
 const standingWolfBase = {
+    hitmarks: [
+        {
+            attackType: "normal",
+            animationName: "attack2",
+            hitmarkTexture: "claw.webp"
+        }
+    ],
     maxDistance: 1.3,
     // sight - notices a player this far off, any direction (createEnemy.js's
     // det.detectRange poll), roars at them (its roar1 clip) and comes for
-    // them. Every other enemy only notices you once you bump into it or hit it.
+    // them. Most other enemies only notice you once you bump into it or hit it
+    // (the stray wolves have sight too).
     detectRange: 24,
     modelStyle: "standingwolf",
     elementType: "none",
@@ -667,7 +700,10 @@ const standingWolfBase = {
     stats: {
         dmg: 45,
         magDmg: 2,
-        spd: 6,
+        // faster than the stray wolf (9) - the bigger hunter - but still
+        // under the player's sprint (inputMovement.js's sprintSpeed 10), so
+        // a sprinting player can still pull away, slowly
+        spd: 9.6,
         atkSpd: 3,
         accuracy: 1.4,
         critical: 1.6,
@@ -680,11 +716,19 @@ const standingWolfBase = {
     // just over its ears
     bodyHeight: 3.0,
     bodyWidenes: 1.6,
-    effects: [] as any[],
+    effects: [bleedEffect] as any[],
     effectsWhenHit: [] as any[],
     titles: ['werewolf'],
+    // every attack is these clips back to back, its damage split across the
+    // swings (client's worldsocket.js "enemy-attacked"). 1.33s each - the
+    // pair just fits atkSpd 3's 2.7s between attacks (createEnemy.js); a
+    // quicker atkSpd (skallgrim's 2.6) plays them a little faster to fit
+    attackCombo: ["attack1", "attack2"],
     aptitude: [] as string[],
-    skills: [] as string[],
+    // claws and the pounce only, no spells - blinkstrike: a telegraphed
+    // leap to you and one boosted swipe (skillEffects.js's
+    // triggerEnemyBlinkstrike). Every standing wolf but Zareth has it.
+    skills: ['blinkstrike'] as string[],
     canDodge: true,
     blessings: [],
     status: [],
@@ -703,24 +747,22 @@ const standingWolfBase = {
     weaponBlocking: false,
     magicBlocking: false,
     IsInVulnerable: false,
-    loots: [mediumCoreLoot],
+    loots: [mediumCoreLoot, beastMeatLoot],
     respawnDetails: {
         willRespawn: true,
         respawnTime: 60 * 1000,
     },
 }
 
-// the brawler - no magic, just the pounce (blinkstrike: a telegraphed leap
-// to you and one boosted swipe, skillEffects.js's triggerEnemyBlinkstrike)
+// the brawler
 const vargoth = {
     ...standingWolfBase,
     name: "vargoth",
     dn: "Vargoth",
     weakness: "lightning",
-    skills: ['blinkstrike'],
 }
 
-// ember-veined - burns (flamebrand), drops a fire core
+// ember-veined - claws that burn, drops a fire core
 const zareth = {
     ...standingWolfBase,
     name: "zareth",
@@ -728,7 +770,8 @@ const zareth = {
     elementType: "fire",
     weakness: "water",
     aptitude: ['fire'],
-    skills: ['flamebrand'],
+    // no pounce - the one wolf that never had it; his claws burn instead
+    skills: [] as string[],
     stats: { ...standingWolfBase.stats, dmg: 50, magDmg: 3 },
     lvl: 22,
     hp: 8500,
@@ -737,11 +780,12 @@ const zareth = {
     effects: [
         // characterstate.js's startBurnDamage - dmgPm off your hp each tick for duration ms
         { effectType: 'burn', chance: 15, permanent: false, dn: 'Scorched', dmgPm: 20, duration: 4000, soundPlayPerDmg: 'dmgpm' },
+        bleedEffect,
     ],
-    loots: [mediumCoreLoot, fireslimeCoreLoot],
+    loots: [mediumCoreLoot, fireslimeCoreLoot, beastMeatLoot],
 }
 
-// black-marked - shadow magic (shadowbolt) and claws that drain you
+// black-marked - claws that drain you
 const morvane = {
     ...standingWolfBase,
     name: "morvane",
@@ -749,20 +793,20 @@ const morvane = {
     elementType: "dark",
     weakness: "light",
     aptitude: ['dark'],
-    skills: ['shadowbolt', 'blinkstrike'],
-    stats: { ...standingWolfBase.stats, dmg: 48, magDmg: 3, spd: 6.5 },
+    stats: { ...standingWolfBase.stats, dmg: 48, magDmg: 3, spd: 9.8 },
     lvl: 25,
     hp: 9500,
     maxHp: 9500,
     expToGain: 2100,
     effects: [
         { effectType: 'spdrain', chance: 15, permanent: false, dn: 'SP Drained', spcost: 30, hpcost: 0, mpcost: 0, hungercost: 4, energycost: 0 },
+        bleedEffect,
     ],
-    loots: [mediumCoreLoot, darkslimeCoreLoot],
+    loots: [mediumCoreLoot, darkslimeCoreLoot, beastMeatLoot],
 }
 
-// frost-white - the pack's strongest: ice spikes (tidalspike) and the
-// heaviest blows; drops an icy celestine shard like the frost scorpion
+// frost-white - the pack's strongest: the heaviest blows; drops an icy
+// celestine shard like the frost scorpion
 const skallgrim = {
     ...standingWolfBase,
     name: "skallgrim",
@@ -770,13 +814,12 @@ const skallgrim = {
     elementType: "water",
     weakness: "fire",
     aptitude: ['water'],
-    skills: ['tidalspike', 'blinkstrike'],
     stats: { ...standingWolfBase.stats, dmg: 60, magDmg: 3, atkSpd: 2.6 },
     lvl: 28,
     hp: 11000,
     maxHp: 11000,
     expToGain: 2600,
-    loots: [mediumCoreLoot, celestineOreLoot],
+    loots: [mediumCoreLoot, celestineOreLoot, beastMeatLoot],
 }
 
 function scatterPosition(areaType: string, half: number, minRadius: number, maxRadius: number) {
@@ -843,6 +886,17 @@ function generateEnemies(base: object, total: number, placeId: number, areaSize:
         x += centerX
         z += centerZ
 
+        // openworld castles (castles.ts) - a spot in or beside one is rolled
+        // again. The margin is more than index.ts's WANDER_RADIUS (8), which is
+        // all an enemy ever strays from its spawn on its own, so wandering
+        // never walks one into a castle wall either. "fixed" spawns are
+        // placed on purpose and left alone.
+        for (let tries = 0; placeId === 888 && areaType !== "fixed" && isNearCastle(x, z, CASTLE_SPAWN_MARGIN) && tries < 20; tries++) {
+            const again = scatterPosition(areaType, half, minRadius, maxRadius)
+            x = again.x + centerX
+            z = again.z + centerZ
+        }
+
         const y = 0
 
         enemies.push({
@@ -901,6 +955,17 @@ export function generateScorchDeer(total = 10, placeId = 1, areaSize = 300, area
 
 export function generateWisfDeer(total = 10, placeId = 1, areaSize = 300, areaType = "village", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
     return generateEnemies(wisfDeer, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius)
+}
+
+// the openworld's deer band (enemyDetails.ts's OPENWORLD_ENEMY_BANDS) - each
+// one spawned is any of the six deer, rolled per deer, so a herd out there is
+// a mix of every coat
+const DEER_VARIANTS = [forestDeer, jasferDeer, luminaDeer, nightmareDeer, scorchDeer, wisfDeer]
+export function generateWildDeer(total = 10, placeId = 1, areaSize = 300, areaType = "village", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
+    return Array.from({ length: total }, () => {
+        const variant = DEER_VARIANTS[Math.floor(Math.random() * DEER_VARIANTS.length)]
+        return generateEnemies(variant, 1, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius)[0]
+    })
 }
 
 export function generateLesserDemons(total = 1, placeId = 1, areaSize = 300, areaType = "fixed", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
