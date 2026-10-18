@@ -1,3 +1,6 @@
+// first of all: it copies the server's log for the admin page, and has to be in
+// place before `const log = console.log` below takes the function
+import "./admin/logTap"
 import http from "http"
 import express from "express"
 import cors from "cors"
@@ -20,6 +23,7 @@ import { getWeather, getWeatherState, rollWeather, setWeather, WEATHER_ROLL_INTE
 import { getDayNightState, setTimeOfDay, DAY_NIGHT_SYNC_INTERVAL_MS } from "./recources/dayNight"
 import { faker } from "@faker-js/faker"
 import { isNearCastle } from "./recources/castles"
+import { setupAdmin } from "./admin"
 
 export const enemyLengthsInPlace = [
     {   
@@ -3090,6 +3094,29 @@ function removeCharacter(ownerId: string, playerName: string, placeId: number){
 
     io.emit('removeChar', { ownerId, playerName, placeId })
 }
+// the master control (admin/): a page at /admin and its socket namespace. The
+// world is handed over as getters and setters since this file reassigns its own
+// state (tcpEnemies = tcpEnemies.filter(...)) and a copy would go stale.
+setupAdmin({
+    app,
+    io,
+    world: {
+        get players() { return players }, set players(value) { players = value },
+        get enemies() { return tcpEnemies }, set enemies(value) { tcpEnemies = value },
+        get treasures() { return treasures }, set treasures(value) { treasures = value },
+        get grains() { return grains }, set grains(value) { grains = value },
+        get mushrooms() { return mushrooms }, set mushrooms(value) { mushrooms = value },
+        get bonfires() { return bonfires },
+        get trunks() { return trunks },
+        get structures() { return structures },
+        get struckWeapons() { return struckWeapons },
+        get bots() { return bots },
+        get spawnBotsEnabled() { return spawnBotsEnabled }, set spawnBotsEnabled(value) { spawnBotsEnabled = value },
+        spawnBot: overrides => spawnBot(overrides),
+        get hunts() { return hunts },
+    },
+})
+
 server.listen(PORT, () => log("TCP server is on port", PORT))
 
 

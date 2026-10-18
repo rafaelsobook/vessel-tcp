@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex, nofollow">
+    <title>Master Control</title>
+    <!-- inline, so the browser's automatic /favicon.ico request has nothing left to 404 -->
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2312141a'/%3E%3Cpath d='M8 23V9l8 9 8-9v14' fill='none' stroke='%23caa501' stroke-width='3' stroke-linejoin='round'/%3E%3C/svg%3E">
+    <link rel="stylesheet" href="admin.css">
+</head>
+<body>
+    <!-- everything on this page is built by app.js; nothing runs without the key -->
+    <div id="login" class="login">
+        <form id="loginForm" class="login-card" autocomplete="off">
+            <h1>Master Control</h1>
+            <p class="muted">Dungeon Born - server administration</p>
+            <label for="keyInput">Admin key</label>
+            <input id="keyInput" type="password" autocomplete="off" spellcheck="false" autofocus>
+            <label class="check"><input id="rememberInput" type="checkbox"> Remember on this device</label>
+            <button type="submit" class="btn primary" id="loginBtn">Connect</button>
+            <p id="loginError" class="error" hidden></p>
+        </form>
+    </div>
+
+    <div id="app" class="app" hidden>
+        <header class="topbar">
+            <div class="brand">Master Control</div>
+            <div class="topbar-status">
+                <span id="connDot" class="dot"></span>
+                <span id="connText">connecting</span>
+                <span class="sep">|</span>
+                <span id="topUptime" class="muted"></span>
+            </div>
+            <button id="logoutBtn" class="btn small">Log out</button>
+        </header>
+        <nav id="tabs" class="tabs"></nav>
+        <main id="views" class="views"></main>
+    </div>
+
+    <div id="toasts" class="toasts"></div>
+    <div id="modalRoot"></div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script type="module" src="app.js"></script>
+</body>
+</html>
