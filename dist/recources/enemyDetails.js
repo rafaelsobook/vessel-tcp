@@ -4,6 +4,8 @@ exports.OPENWORLD_ENEMY_BANDS = exports.OPENWORLD_SLIME_TERRITORY = void 0;
 const tools_1 = require("../tools/tools");
 const coreDetails_1 = require("./coreDetails");
 const graveyards_1 = require("./graveyards");
+const enemiesInDungeon_1 = require("./enemiesInDungeon");
+const enemyAttacks_1 = require("./enemyAttacks");
 const genenemy_1 = require("../generate-datas/genenemy");
 let monolithBodyHeight = 2;
 // openworld (placeId 888) enemy territory - every enemy placed there (both
@@ -11,15 +13,15 @@ let monolithBodyHeight = 2;
 // dynamically topped up on top of them) carries this same object on
 // .territory, a shared reference rather than a fresh copy per enemy.
 // Centered on infterrain's own SPAWN_X/SPAWN_Z (0, 500) - same center every
-// band below is already scattered around. maxDist (2600) matches
-// OPENWORLD_ENEMY_BANDS' own outermost band (forestdeer, ...-2600) exactly -
+// band below is already scattered around. maxDist (3400) matches
+// OPENWORLD_ENEMY_BANDS' own outermost band (straywolf, ...-3400) exactly -
 // see that table further down for the real per-type radius breakdown; kept
 // as its own separate constant here only because this whole object needs to
 // exist before withTerritory (right below) can reference it, and
 // withTerritory itself needs to exist before OPENWORLD_ENEMY_BANDS' own
 // static population uses it. Keep these two in sync if either end of the
 // outermost band ever changes.
-exports.OPENWORLD_SLIME_TERRITORY = { center: { x: 0, y: 0, z: 500 }, minDist: 0, maxDist: 2600 };
+exports.OPENWORLD_SLIME_TERRITORY = { center: { x: 0, y: 0, z: 500 }, minDist: 0, maxDist: 3400 };
 // applies OPENWORLD_SLIME_TERRITORY to every enemy a generator call
 // produced - .map() instead of baking .territory into the shared
 // slimeBase/fireSlimeBase/electricSlimeBase templates themselves
@@ -90,7 +92,7 @@ const enemyInterface = {
 // nearest-to-farthest, matching the intended difficulty progression a
 // player walking straight out from spawn should actually encounter:
 // waterslime -> fireslime -> electricslime -> orangelith -> darkslime ->
-// forestdeer. Bands are contiguous and non-overlapping by construction (each
+// deer (all six coats) -> straywolf (the wild, far out - a big pack). Bands are contiguous and non-overlapping by construction (each
 // one's minDist is the previous one's maxDist) - keep them that way when
 // tuning, or two types end up sharing ground again.
 //
@@ -119,7 +121,8 @@ exports.OPENWORLD_ENEMY_BANDS = [
     { generator: genenemy_1.generateElectricSlimes, name: "electricslime", count: 50, minDist: 450, maxDist: 850 },
     { generator: genenemy_1.generateMonoliths, name: "orangelith", count: 5, minDist: 850, maxDist: 950 },
     { generator: genenemy_1.generateDarkSlimes, name: "darkslime", count: 50, minDist: 950, maxDist: 2000 },
-    { generator: genenemy_1.generateForestDeer, name: "forestdeer", count: 10, minDist: 2000, maxDist: 2600 },
+    { generator: genenemy_1.generateWildDeer, name: "deer", count: 18, minDist: 2000, maxDist: 2600 },
+    { generator: genenemy_1.generateStrayWolves, name: "straywolf", count: 40, minDist: 2600, maxDist: 3400 },
 ];
 exports.default = [
     // openworld (placeId 888) - the six bands above, in the exact same
@@ -131,7 +134,7 @@ exports.default = [
     // whole area upfront - see client/src/sockets/renderer.js's own
     // OPENWORLD_PLACE_ID distance-based mesh hiding for how the client keeps
     // this affordable regardless of how many end up alive at once), 5/10 for
-    // the two rarer/tougher single-type bands (orangelith/forestdeer).
+    // the two rarer/tougher single-type bands (orangelith/deer).
     ...exports.OPENWORLD_ENEMY_BANDS.flatMap(band => withTerritory(band.generator(band.count, 888, band.maxDist * 2, "ring", 0, 500, band.minDist, band.maxDist))),
     // graveyard ghosts (placeId 888, openworld) - one group per plot in
     // graveyards.ts (the mirror of the client's constants/graveyards.js).
@@ -143,6 +146,17 @@ exports.default = [
     // (worldsocket.js's OPENWORLD_ENEMY_CREATE_DIST), so ghosts at plots
     // nobody is near cost nothing there.
     ...graveyards_1.OPENWORLD_GRAVEYARDS.flatMap(plot => (0, genenemy_1.generateGhosts)((0, graveyards_1.ghostsForGraveyard)(plot.areaSize), 888, plot.areaSize * 0.8, "square", plot.position.x, plot.position.z)),
+    // the four standing wolves (genenemy.ts's standingWolfBase) - far too
+    // strong for the village, so they live out in the stray wolves' band
+    // (2600-3400 from the openworld centre (0, 500)), one to a direction,
+    // the stronger the farther out: Vargoth NE ~2700, Zareth S ~2900,
+    // Morvane SW ~3100, Skallgrim NW ~3300. Each spot was picked off the real
+    // terrain - dry (above the river/water level) and flat for a few units
+    // around.
+    ...(0, genenemy_1.generateStandingWolf)("vargoth", 1, 888, 300, "fixed", 1350, 2838),
+    ...(0, genenemy_1.generateStandingWolf)("zareth", 1, 888, 300, "fixed", 751, -2301),
+    ...(0, genenemy_1.generateStandingWolf)("morvane", 1, 888, 300, "fixed", -2192, -1692),
+    ...(0, genenemy_1.generateStandingWolf)("skallgrim", 1, 888, 300, "fixed", -2858, 2150),
     // single lesserdemon - removed for now (was at (85, 585), ~120 units
     // from the true openworld center (0, 500), inside waterslime's own
     // 100-150 band - see git history/prior comment here for the full
@@ -160,6 +174,8 @@ exports.default = [
         modelStyle: "slime",
         elementType: "water",
         aptitude: ['water'],
+        // ducks a fifth of the plain close-range swings - genenemy.ts's slimeBase
+        dockChance: 0.2,
         stats: {
             dmg: 5,
             magDmg: 1,
@@ -202,6 +218,14 @@ exports.default = [
         skills: ['flamebrand'],
         // see createEnemy.js's own dodge-detection interval
         canDodge: true,
+        // a ranged attack beside its skill (client/src/enemies/rangeAttack.js):
+        // past melee reach it puffs up and lobs a fireball at where its target
+        // is headed - a ring on the ground shows where it'll come down. Caught in
+        // the blast, they're thrown back burnt to a crisp (effects/scorch.js).
+        // color: red, blue, green, purple, white or any "#rrggbb" (effects/fireball.js)
+        rangeAtkDetails: { range: 15, modelName: false, projectileDet: { pType: "fireball", color: "red" }, soundWhenHit: "firehit", victimAnimation: "hit_struct1" },
+        // the body slam - knockback and stun (recources/enemyAttacks.ts)
+        additionalAttacks: [enemyAttacks_1.SLIME_BASH_ATTACK],
         stats: {
             dmg: 5,
             magDmg: 1,
@@ -235,9 +259,18 @@ exports.default = [
         aptitude: ['lightning'],
         // Elite Skill (skillrank 1) matching its element - see
         // client/src/staticRecources/skillsData.js's lightningboltSkill
-        skills: ['lightningbolt'],
+        skills: ['lightningbolt', 'voltstep'],
         // see createEnemy.js's own dodge-detection interval
         canDodge: true,
+        // ducks half of the plain close-range swings - genenemy.ts's
+        // electricSlimeBase
+        dockChance: 0.5,
+        // a ranged attack beside its skill (client/src/enemies/rangeAttack.js):
+        // past melee reach it charges, then strikes a lightning bolt at its
+        // target - the victim lit up to the bones (effects/electrocute.js)
+        rangeAtkDetails: { range: 15, modelName: false, projectileDet: { pType: "lightning", color: "yellow" }, soundWhenHit: "electrichit", victimAnimation: "electrified" },
+        // the body slam - knockback and stun (recources/enemyAttacks.ts)
+        additionalAttacks: [enemyAttacks_1.SLIME_BASH_ATTACK],
         stats: {
             dmg: 5,
             magDmg: 1,
@@ -253,29 +286,15 @@ exports.default = [
         expToGain: 500,
         // deathSound: "slimedeath",
     },
-    // one of each deer texture variant, village (placeId 1) - "fixed"
-    // areaType lands each exactly at (centerX, centerZ) with no scatter,
-    // same pattern generateLesserDemons(1, 888, ...) uses for its own single
-    // openworld spawn. Continues the waterslime/fireslime/electricslime row
-    // above (3.6/6.6/9.6 along x) in the same 3-unit spacing, purely so all
-    // 6 are lined up and easy to walk down and look at - genenemy.ts's own
-    // jasferDeer/luminaDeer/nightmareDeer/scorchDeer/wisfDeer bases already
-    // carry their own real stats/loot/effects (recolors of forestDeer), no
-    // need to redeclare them here.
-    ...(0, genenemy_1.generateForestDeer)(1, 1, 300, "fixed", 12.6, 130),
-    ...(0, genenemy_1.generateJasferDeer)(1, 1, 300, "fixed", 15.6, 130),
-    ...(0, genenemy_1.generateLuminaDeer)(1, 1, 300, "fixed", 18.6, 130),
-    ...(0, genenemy_1.generateNightmareDeer)(1, 1, 300, "fixed", 21.6, 130),
-    ...(0, genenemy_1.generateScorchDeer)(1, 1, 300, "fixed", 24.6, 130),
-    ...(0, genenemy_1.generateWisfDeer)(1, 1, 300, "fixed", 27.6, 130),
-    // graveyard ghosts (placeId 1, village) - localroomdb.js's graveYards
-    // entry for this place: position (55, 10), areaSize 10. Same 0.8x
-    // shrink-to-stay-inside-the-fence reasoning as the openworld graveyard
-    // ghosts above, just a much smaller plot - 2 ghosts, not this file's
-    // usual village trash-mob counts, since the whole fenced square is only
-    // 10x10 and already shares that space with creategraveyard.js's own
-    // rows of gravestones.
-    ...(0, genenemy_1.generateGhosts)(2, 1, 8, "square", 55, 10),
+    // the deer and the stray wolf that ended this row live in the openworld
+    // now (OPENWORLD_ENEMY_BANDS - all six deer coats mixed, genenemy.ts's
+    // generateWildDeer; the wolves out past them, hunting in packs)
+    // no ghosts in the village's graveyard (localroomdb.js's graveYards entry,
+    // (55, 10)) any more - taken out on request; ghosts haunt the openworld's
+    // graveyards (above) and the dungeons only
+    // procedural dungeons (placeId 12) - ghosts through the rooms, a lesser
+    // demon boss on the dais; placement lives in enemiesInDungeon.ts
+    ...enemiesInDungeon_1.DUNGEON_ENEMIES,
     // {...enemyInterface,
     //     _id: `${randNumString()}`,
     //     x: 3.6,

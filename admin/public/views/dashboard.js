@@ -11,7 +11,7 @@ export function create(app) {
     const grid = el("div", { class: "grid cols-4" })
     ;[
         ["players", "Players online"], ["enemies", "Enemies"], ["treasures", "Chests"], ["grains", "Grains"],
-        ["mushrooms", "Mushrooms"], ["crafted", "Crafted structures"], ["weather", "Weather"], ["time", "World time"],
+        ["mushrooms", "Mushrooms"], ["ores", "Ore deposits"], ["crafted", "Crafted structures"], ["weather", "Weather"], ["time", "World time"],
         ["uptime", "Server uptime"], ["memory", "Memory"], ["admins", "Admins connected"], ["hunts", "Werewolf hunts"],
     ].forEach(([key, label]) => {
         stats[key] = { value: el("div", { class: "value", text: "-" }), sub: el("div", { class: "sub", text: " " }) }
@@ -50,7 +50,7 @@ export function create(app) {
         // replaceChildren turns a null into the text "null", so the lines that
         // only sometimes apply are filtered out first
         persistBody.replaceChildren(...[
-            el("div", {}, `Kept across restarts: ${counts.enemies ?? 0} enemies, ${counts.treasures ?? 0} chests, ${counts.grains ?? 0} grains, ${counts.mushrooms ?? 0} mushrooms.`),
+            el("div", {}, `Kept across restarts: ${counts.enemies ?? 0} enemies, ${counts.treasures ?? 0} chests, ${counts.grains ?? 0} grains, ${counts.mushrooms ?? 0} mushrooms, ${counts.ores ?? 0} ores.`),
             el("div", { class: "muted" }, `Stored by ${info.server} as "${info.world}".${info.lastSavedAt ? ` Last saved ${fmtDateTime(info.lastSavedAt)}.` : ""}${info.dirty ? " Changes waiting to be saved." : ""}`),
             info.status === "off" ? el("div", { class: "muted", text: "Persistence is switched off (ADMIN_PERSIST=off). Anything you add lasts until the next restart." }) : null,
             info.status === "loading" ? el("div", { class: "muted", text: "Waiting for the REST server (a free host can take a minute to wake up). Nothing is saved until it answers." }) : null,
@@ -68,6 +68,7 @@ export function create(app) {
         set("treasures", fmtNum(world.treasures))
         set("grains", fmtNum(world.grains))
         set("mushrooms", fmtNum(world.mushrooms))
+        set("ores", fmtNum(world.ores))
         set("crafted", fmtNum(world.bonfires + world.trunks + world.structures), `${world.bonfires} bonfires, ${world.trunks} logs, ${world.structures} other`)
         set("weather", world.weather)
         set("time", clockOf(world.timeOfDay))

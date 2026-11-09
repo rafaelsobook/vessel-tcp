@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.BOT_ITEMS_BY_TYPE = exports.RUNECALLER_ITEMS = exports.WARBRINGER_ITEMS = exports.BOT_METAL_COLORS = exports.METAL_TIERS = void 0;
 exports.buildBotItem = buildBotItem;
+exports.buildEquipableItem = buildEquipableItem;
 exports.rollBotLevelReward = rollBotLevelReward;
 exports.botTypeFor = botTypeFor;
 exports.botTotalDef = botTotalDef;
@@ -50,6 +51,7 @@ exports.WARBRINGER_ITEMS = [
     { name: "orionhelm", modelName: "orionhelm", dn: "Orion Helm", itemType: "helmet", metalTinted: true, def: 18, resistance: 12, price: 32, rarity: "rare" },
     { name: "ironmask", modelName: "ironmask", dn: "Mask", itemType: "helmet", metalTinted: true, hairVisible: true, def: 14, resistance: 8, price: 25, rarity: "rare" },
     { name: "gauntler", dn: "Gauntlet", itemType: "gauntlet", metalTinted: true, def: 10, resistance: 6, price: 22, rarity: "rare" },
+    { name: "braveknee", dn: "Brave Kneeguard", itemType: "kneearmor", metalTinted: true, def: 12, resistance: 6, price: 26, rarity: "rare" },
     { name: "leatherboots", dn: "Leather Boots", itemType: "boots", def: 0, resistance: 5, price: 9, rarity: "common" },
 ];
 // casters - no plate at all, a runecaller reads as robed. kraunmask is metal
@@ -109,7 +111,25 @@ function rollMetalColor(botLvl) {
  * createcharacter.js and equiped-item paths need no special handling.
  */
 function buildBotItem(template, botLvl = 1) {
-    const metalColor = template.metalTinted ? rollMetalColor(botLvl) : undefined;
+    const item = buildEquipableItem(template, template.metalTinted ? rollMetalColor(botLvl) : undefined);
+    return {
+        ...item,
+        itemId: `bot-item-${(0, tools_1.randNumString)()}`,
+        equiped: true,
+        // read only by the level-up broadcast, so it knows whether this one
+        // is worth telling the whole server about
+        _announce: ANNOUNCE_RARITIES.includes(item.rarity),
+    };
+}
+/**
+ * A template made in the given metal (METAL_TIERS key), unequipped - shared by
+ * the bots above and the guild board's contract rewards (quests.ts), which
+ * pick their own metal instead of rolling one. No metal (or an untinted piece
+ * like leather boots) keeps the template's own stats, price and rarity.
+ */
+function buildEquipableItem(template, metalColor) {
+    if (!template.metalTinted)
+        metalColor = undefined;
     const tier = metalColor ? exports.METAL_TIERS[metalColor] : undefined;
     const def = tier ? Math.round(template.def * tier.defMult) : template.def;
     const resistance = tier ? Math.round(template.resistance * tier.resMult) : template.resistance;
@@ -119,7 +139,7 @@ function buildBotItem(template, botLvl = 1) {
     // boots) keep their own name as-is - there is no metal to name.
     const dn = tier ? `${tier.prefix} ${template.dn}` : template.dn;
     return {
-        itemId: `bot-item-${(0, tools_1.randNumString)()}`,
+        itemId: (0, tools_1.randNumString)(),
         name: template.name,
         modelName: template.modelName,
         dn,
@@ -128,7 +148,7 @@ function buildBotItem(template, botLvl = 1) {
         weaponType: undefined,
         equipAbilities: { dmg: 0, def, resistance, magicDmg: 0, plusStr: 0, plusDex: 0, plusInt: 0 },
         consumeAbilities: { plusHp: 0, plusMp: 0, plusSp: 0, plusDmg: 0, plusSpd: 0 },
-        equiped: true,
+        equiped: false,
         soulFeed: 0,
         isEnhanceAble: true,
         enhancedLevel: 0,
@@ -139,9 +159,6 @@ function buildBotItem(template, botLvl = 1) {
         rarity,
         metalColor,
         hairVisible: template.hairVisible,
-        // read only by the level-up broadcast, so it knows whether this one
-        // is worth telling the whole server about
-        _announce: ANNOUNCE_RARITIES.includes(rarity),
     };
 }
 /**

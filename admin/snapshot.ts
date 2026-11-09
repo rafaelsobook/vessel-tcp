@@ -68,6 +68,8 @@ export function buildSnapshot(world: AdminWorld, adminCount: number) {
             grains: world.grains.length,
             mushrooms: world.mushrooms.length,
             mushroomsByKind: countBy(world.mushrooms, m => m.kind),
+            ores: world.ores.length,
+            oresByVein: countBy(world.ores, o => o.vein),
             bonfires: world.bonfires.length,
             trunks: world.trunks.length,
             structures: world.structures.length,

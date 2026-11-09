@@ -17,6 +17,11 @@ export type Tmushroom = {
     kind: string
     pos: { x: number, y: number, z: number }
     currentPlaceId: number
+    // an openworld one whose pos.y is its real floor, not one for the client
+    // to ground on the terrain (hiddenHoards.ts's, down a well or in a cave)
+    exactY?: boolean
+    // grows back this long after it's picked, instead of index.ts's MUSHROOM_REGROW_MS
+    regrowMs?: number
 }
 
 // clusters per room: one per this many floor cells, 1 to MAX

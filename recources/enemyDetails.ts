@@ -2,6 +2,7 @@ import { randNumString } from "../tools/tools"
 import { simpleCoreLoot, mediumCoreLoot, waterslimeCoreLoot, fireslimeCoreLoot, electricslimeCoreLoot } from "./coreDetails"
 import { OPENWORLD_GRAVEYARDS, ghostsForGraveyard } from "./graveyards"
 import { DUNGEON_ENEMIES } from "./enemiesInDungeon"
+import { SLIME_BASH_ATTACK } from "./enemyAttacks"
 import { generateSlimes, generateFireSlimes, generateElectricSlimes, generateMonoliths, generateLesserDemons, generateDarkSlimes, generateWildDeer, generateGhosts, generateStrayWolves, generateStandingWolf } from "../generate-datas/genenemy"
 
 let monolithBodyHeight = 2
@@ -181,6 +182,8 @@ export default [
         modelStyle: "slime",
         elementType: "water",
         aptitude: ['water'],
+        // ducks a fifth of the plain close-range swings - genenemy.ts's slimeBase
+        dockChance: 0.2,
         stats: {
             dmg: 5,
             magDmg: 1,
@@ -223,6 +226,14 @@ export default [
         skills: ['flamebrand'],
         // see createEnemy.js's own dodge-detection interval
         canDodge: true,
+        // a ranged attack beside its skill (client/src/enemies/rangeAttack.js):
+        // past melee reach it puffs up and lobs a fireball at where its target
+        // is headed - a ring on the ground shows where it'll come down. Caught in
+        // the blast, they're thrown back burnt to a crisp (effects/scorch.js).
+        // color: red, blue, green, purple, white or any "#rrggbb" (effects/fireball.js)
+        rangeAtkDetails: { range: 15, modelName: false, projectileDet: { pType: "fireball", color: "red" }, soundWhenHit: "firehit", victimAnimation: "hit_struct1" },
+        // the body slam - knockback and stun (recources/enemyAttacks.ts)
+        additionalAttacks: [SLIME_BASH_ATTACK],
         stats: {
             dmg: 5,
             magDmg: 1,
@@ -256,9 +267,18 @@ export default [
         aptitude: ['lightning'],
         // Elite Skill (skillrank 1) matching its element - see
         // client/src/staticRecources/skillsData.js's lightningboltSkill
-        skills: ['lightningbolt'],
+        skills: ['lightningbolt', 'voltstep'],
         // see createEnemy.js's own dodge-detection interval
         canDodge: true,
+        // ducks half of the plain close-range swings - genenemy.ts's
+        // electricSlimeBase
+        dockChance: 0.5,
+        // a ranged attack beside its skill (client/src/enemies/rangeAttack.js):
+        // past melee reach it charges, then strikes a lightning bolt at its
+        // target - the victim lit up to the bones (effects/electrocute.js)
+        rangeAtkDetails: { range: 15, modelName: false, projectileDet: { pType: "lightning", color: "yellow" }, soundWhenHit: "electrichit", victimAnimation: "electrified" },
+        // the body slam - knockback and stun (recources/enemyAttacks.ts)
+        additionalAttacks: [SLIME_BASH_ATTACK],
         stats: {
             dmg: 5,
             magDmg: 1,
@@ -277,14 +297,9 @@ export default [
     // the deer and the stray wolf that ended this row live in the openworld
     // now (OPENWORLD_ENEMY_BANDS - all six deer coats mixed, genenemy.ts's
     // generateWildDeer; the wolves out past them, hunting in packs)
-    // graveyard ghosts (placeId 1, village) - localroomdb.js's graveYards
-    // entry for this place: position (55, 10), areaSize 10. Same 0.8x
-    // shrink-to-stay-inside-the-fence reasoning as the openworld graveyard
-    // ghosts above, just a much smaller plot - 2 ghosts, not this file's
-    // usual village trash-mob counts, since the whole fenced square is only
-    // 10x10 and already shares that space with creategraveyard.js's own
-    // rows of gravestones.
-    ...generateGhosts(2, 1, 8, "square", 55, 10),
+    // no ghosts in the village's graveyard (localroomdb.js's graveYards entry,
+    // (55, 10)) any more - taken out on request; ghosts haunt the openworld's
+    // graveyards (above) and the dungeons only
     // procedural dungeons (placeId 12) - ghosts through the rooms, a lesser
     // demon boss on the dais; placement lives in enemiesInDungeon.ts
     ...DUNGEON_ENEMIES,

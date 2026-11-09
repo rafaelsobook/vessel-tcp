@@ -1,7 +1,7 @@
 import { el, clear, field, select, button, chip, emptyRow, confirmDialog, toast, fmtNum, fmtPos } from "../ui.js"
 import { createWhereForm } from "../where.js"
 
-// Chests, grains and mushrooms: put them down anywhere, see what's there, take
+// Chests, grains, mushrooms and ore deposits: put them down anywhere, see what's there, take
 // them away. One panel per kind, the same shape each.
 
 const EXAMPLE_ITEM = JSON.stringify({
@@ -19,6 +19,7 @@ export function create(app) {
         { id: "treasures", label: "Chests", noun: "chest", form: chestForm },
         { id: "grains", label: "Grains", noun: "grain", form: grainForm },
         { id: "mushrooms", label: "Mushrooms", noun: "mushroom", form: mushroomForm },
+        { id: "ores", label: "Ores", noun: "ore", form: oreForm },
     ]
     const panels = new Map()
     let current = kinds[0].id
@@ -152,6 +153,19 @@ export function create(app) {
             node: el("div", { class: "stack" }, el("div", { class: "row" }, field("Kind", kind, { cls: "wide" }), field("How many", count, { cls: "narrow", hint: "300 at most" })), where.node, keep.node,
                 el("div", { class: "hint", text: "A picked mushroom grows back where it was after 10 minutes." })),
             get: () => ({ kind: kind.value, count: count.value, ...where.get(), keep: keep.input.checked }),
+        }
+    }
+
+    function oreForm() {
+        const vein = select(app.catalog.ores.map(o => ({ value: o.vein, label: `${o.vein} - ${o.color} (${o.holds})` })))
+        const count = el("input", { type: "number", min: 1, max: 50, value: 3 })
+        const where = createWhereForm(app, { radiusLabel: "Spread (radius)", radiusDefault: 3 })
+        const keep = keepBox()
+        return {
+            where, submitLabel: "Add ores", command: "ores.add", done: r => `${r.added} added`,
+            node: el("div", { class: "stack" }, el("div", { class: "row" }, field("Vein", vein, { cls: "wide" }), field("How many", count, { cls: "narrow", hint: "50 at most" })), where.node, keep.node,
+                el("div", { class: "hint", text: "Each has 100 hit points - a pickaxe swing takes one. One worked out is gone; an hour later a fresh one stands where it did." })),
+            get: () => ({ vein: vein.value, count: count.value, ...where.get(), keep: keep.input.checked }),
         }
     }
 

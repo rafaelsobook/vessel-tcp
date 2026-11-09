@@ -11,8 +11,11 @@ const LAYERS = [
     { id: "treasures", label: "Chests", color: "#e0a43a" },
     { id: "grains", label: "Grains", color: "#8fbf5a" },
     { id: "mushrooms", label: "Mushrooms", color: "#b07fd6" },
+    { id: "ores", label: "Ores", color: "#9aa3b5" },
     { id: "structures", label: "Crafted", color: "#e08a4a" },
 ]
+// an ore's dot takes the colour of its texture
+const ORE_COLORS = { dark: "#8a7a6a", blue: "#4aa3ff", red: "#e5645c", gold: "#e0a43a", white: "#e8e8f0", gloom: "#9fb4ff", green: "#5ad06a", purple: "#b45cff" }
 const REFRESH_MS = 2000
 const HIT_RADIUS_PX = 9
 // how much closer a bigger, drawn-on-top marker counts as (see hitTest)
@@ -147,6 +150,7 @@ export function create(app) {
         }
         if (layerOn.grains) data.grains.forEach(item => dot(item, "#8fbf5a", 2))
         if (layerOn.mushrooms) data.mushrooms.forEach(item => dot(item, "#b07fd6", 2.6))
+        if (layerOn.ores) data.ores.forEach(item => dot(item, ORE_COLORS[item.color] ?? "#9aa3b5", 4))
         if (layerOn.structures) data.structures.forEach(item => dot(item, "#e08a4a", 4))
         if (layerOn.treasures) data.treasures.forEach(item => {
             const p = toScreen(item.x, item.z)
@@ -200,6 +204,7 @@ export function create(app) {
         if (layerOn.enemies) consider("enemies", data.enemies)
         if (layerOn.treasures) consider("treasures", data.treasures)
         if (layerOn.mushrooms) consider("mushrooms", data.mushrooms)
+        if (layerOn.ores) consider("ores", data.ores)
         if (layerOn.grains) consider("grains", data.grains)
         if (layerOn.players) consider("players", data.players)
         return best
@@ -211,6 +216,7 @@ export function create(app) {
         if (kind === "enemies") return `${item.dn ?? item.name} - ${item.hp}/${item.maxHp} hp${item.target ? " - in a fight" : ""}`
         if (kind === "treasures") return `Chest: ${item.label}`
         if (kind === "mushrooms") return `${item.kind} mushroom`
+        if (kind === "ores") return `${item.vein} ore (${item.color}) - ${item.hp}/${item.maxHp} hp`
         return "Grain"
     }
 
@@ -292,7 +298,7 @@ export function create(app) {
             }, { small: true }), button("Lift 4", () => app.run("players.teleport", { owner: item.id, lift: 4 }, "Lifted"), { small: true }))
         }
         if (kind === "enemies") actions.append(button("Remove", async () => { if (await app.run("enemies.remove", { ids: [item.id] }, "Removed")) { selected = null; refresh() } }, { small: true, kind: "danger" }))
-        if (kind === "treasures" || kind === "grains" || kind === "mushrooms") {
+        if (kind === "treasures" || kind === "grains" || kind === "mushrooms" || kind === "ores") {
             actions.append(button("Remove", async () => { if (await app.run("pickups.remove", { kind, ids: [item.id] }, "Removed")) { selected = null; refresh() } }, { small: true, kind: "danger" }))
         }
         selectBox.append(actions)
@@ -311,7 +317,7 @@ export function create(app) {
                 selected = fresh ? { kind: selected.kind, item: fresh } : null
                 renderSelected()
             }
-            summary.textContent = `${data.players.length} players, ${data.enemies.length} enemies, ${data.treasures.length} chests, ${data.grains.length} grains, ${data.mushrooms.length} mushrooms`
+            summary.textContent = `${data.players.length} players, ${data.enemies.length} enemies, ${data.treasures.length} chests, ${data.grains.length} grains, ${data.mushrooms.length} mushrooms, ${data.ores.length} ores`
             draw()
         } catch (error) { summary.textContent = error.message } finally { loading = false }
     }

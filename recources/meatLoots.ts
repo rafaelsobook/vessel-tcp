@@ -15,3 +15,10 @@ const TAINTED_MEAT = {
 export const beastMeatLoot = cookableFood("standingwolfmeat", "Beast Meat", "normal", 8,
     "Dark, sinewy meat carved from a werewolf. It fills you up, but eaten raw it can turn your stomach.",
     { plusHp: 250, fillHunger: 35, inflict: [TAINTED_MEAT] })()
+
+// the stray wolves (genenemy.ts) - icon images/items/consumable/rib.webp, roasts
+// on the bonfire as models/outdors/rib.glb. A lighter cut than the werewolves'
+// Beast Meat, as the stray wolf is the lesser beast.
+export const wolfRibLoot = cookableFood("rib", "Wolf Rib", "normal", 5,
+    "A rack of lean rib from a stray wolf. More bone than meat, but it fills the gap - and raw, it can turn your stomach.",
+    { plusHp: 150, fillHunger: 25, inflict: [TAINTED_MEAT] })()

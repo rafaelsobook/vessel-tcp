@@ -1,4 +1,6 @@
 import { randNumString } from "../tools/tools"
+import { rollSupplies, TsupplyRoll } from "./craftingSupplies"
+import { VILLAGE_CHEST_SPOTS } from "./villageChestSpots"
 
 // World treasure chests - each one pairs a spawn position with the item
 // inside it. itemDetail mirrors client/src/staticRecources/swordsdata.js's
@@ -26,9 +28,11 @@ import { randNumString } from "../tools/tools"
 export type TreasurePos = { x: number, y: number, z: number }
 
 // any chest: where it stands, which place it's in, and the ready-to-obtain()
-// item inside (createTreasureMesh skins the chest by itemDetail.rarity)
-export function createTreasure(pos: TreasurePos, currentPlaceId: number, itemDetail: any) {
-    return { itemId: randNumString(), pos, currentPlaceId, itemDetail }
+// item inside (createTreasureMesh skins the chest by itemDetail.rarity).
+// extras: more items in the same chest - the client hands them all out
+// together when it's opened; the skin still follows itemDetail alone.
+export function createTreasure(pos: TreasurePos, currentPlaceId: number, itemDetail: any, extras: any[] = []) {
+    return { itemId: randNumString(), pos, currentPlaceId, itemDetail, ...(extras.length ? { extras } : {}) }
 }
 
 export function createSwordTreasure(pos: TreasurePos, currentPlaceId: number = 1) {
@@ -39,6 +43,9 @@ export function createSwordTreasure(pos: TreasurePos, currentPlaceId: number = 1
         itemCateg: "equipable", //equipable,crafting(for item looted),consum(/foods/buffs/potions)
         itemType: "weapon", // weapon/staff/spear/Pauldrons//armor/greaves || //food//potion//buff
         weaponType: "sword",
+        effectsWhenHit: [
+            { effectName: "bash", distanceKnockback: 4, triggerWhen: "critical", particlesystem: null, texture: null },
+        ],
         equipAbilities: {
             dmg: 16, def: 0, magicDmg: 0, plusStr: 0, plusDex: 0, plusInt: 0,
         }, //str(hp,dmg) // dex(def, spd) // int(magicDmg, mana)
@@ -67,6 +74,40 @@ export function createSwordTreasure(pos: TreasurePos, currentPlaceId: number = 1
         }
     })
 }
+// THE VILLAGE SUPPLY CHEST - one plain chest of nails and leather somewhere in
+// the village, so the anvil's nails (client campcraft.js) can be had without
+// a dungeon run. Opened, it comes back VILLAGE_CHEST_RESPAWN_MS later
+// somewhere else in the village (villageChestSpots.ts) - index.ts's
+// removeTreasure handler, through respawnOf below.
+const VILLAGE_PLACE_ID = 1
+const VILLAGE_CHEST_RESPAWN_MS = 60 * 1000
+const VILLAGE_CHEST_CONTENTS: TsupplyRoll[] = [["nail", 3, 5], ["leather", 1, 3]]
+
+function villageSupplyChest(notAt?: TreasurePos) {
+    // anywhere but where it just was
+    const spots = VILLAGE_CHEST_SPOTS.filter(([x, z]) => !notAt || x !== notAt.x || z !== notAt.z)
+    const [x, z] = spots[Math.floor(Math.random() * spots.length)]
+    const [first, ...rest] = rollSupplies(VILLAGE_CHEST_CONTENTS)
+    return { ...createTreasure({ x, y: 0, z }, VILLAGE_PLACE_ID, first, rest), respawns: "villageSupply" }
+}
+
+// a chest that comes back once it's opened (its record's `respawns`): when, and
+// the new one to put out then. null for every other chest - opened for good.
+type TrespawnRule = { afterMs: number, make: (opened: any) => any }
+const RESPAWNING_CHESTS: Record<string, TrespawnRule> = {
+    villageSupply: { afterMs: VILLAGE_CHEST_RESPAWN_MS, make: opened => villageSupplyChest(opened.pos) },
+}
+// another file's chests that come back (hiddenHoards.ts's) - added from there,
+// since that file imports this one and this one can't import it back
+export function addRespawningChest(name: string, rule: TrespawnRule) {
+    RESPAWNING_CHESTS[name] = rule
+}
+export function respawnOf(opened: any) {
+    const rule = RESPAWNING_CHESTS[opened?.respawns]
+    return rule ? { afterMs: rule.afterMs, make: () => rule.make(opened) } : null
+}
+
 export const startingTreasures = [
     createSwordTreasure({ x: 2.2, y: 0, z: 4.12 }),
+    villageSupplyChest(),
 ]

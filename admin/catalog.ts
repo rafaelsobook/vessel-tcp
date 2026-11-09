@@ -5,9 +5,10 @@ import {
     generateLesserDemons, generateGhosts, generateIceScorpions, generateStrayWolves, generateStandingWolf,
 } from "../generate-datas/genenemy"
 import { MUSHROOM_LIBRARY } from "../recources/mushroomLibrary"
+import { VEINS, oreColor } from "../recources/ores"
 import { createSwordTreasure } from "../recources/treasures"
 import { simpleCoreLoot, mediumCoreLoot, waterslimeCoreLoot, fireslimeCoreLoot, electricslimeCoreLoot, darkslimeCoreLoot, orangelithCoreLoot, celestineOreLoot } from "../recources/coreDetails"
-import { beastMeatLoot } from "../recources/meatLoots"
+import { beastMeatLoot, wolfRibLoot } from "../recources/meatLoots"
 import { DUNGEONS } from "../recources/dungeonLayouts"
 import { floorPlan } from "./geo"
 
@@ -99,6 +100,8 @@ export const PLACES: Place[] = [
     duel(200, "Dueling Grounds"),
     duel(201, "Colousa's Dueling Grounds"),
     duel(202, "Vesper's Dueling Grounds"),
+    duel(203, "Ilvara's Dueling Grounds"),
+    duel(204, "Sable's Dueling Grounds"),
 ]
 
 export const placeById = (placeId: number) => PLACES.find(place => place.placeId === placeId)
@@ -128,6 +131,7 @@ export const ITEM_PRESETS: ItemPreset[] = [
     { key: "sword", label: "Sunfang Edge (rare sword)", build: () => createSwordTreasure({ x: 0, y: 0, z: 0 }).itemDetail },
     { key: "jerky", label: "Jerky", build: jerky },
     { key: "beastmeat", label: "Beast Meat", build: fresh(beastMeatLoot) },
+    { key: "wolfrib", label: "Wolf Rib", build: fresh(wolfRibLoot) },
     ...MUSHROOM_LIBRARY.map(kind => ({
         key: `mushroom:${kind.kind}`,
         label: `Mushroom - ${kind.item().dn}`,
@@ -144,5 +148,8 @@ export const ITEM_PRESETS: ItemPreset[] = [
 ]
 
 export const itemPreset = (key: string) => ITEM_PRESETS.find(preset => preset.key === key)
+
+// every kind of ore vein an admin can put down - its look and what it holds
+export const ORE_VEINS = Object.entries(VEINS).map(([vein, loots]) => ({ vein, color: oreColor(loots), holds: loots.map(loot => loot.name).join(", ") }))
 
 export const MUSHROOM_KINDS = MUSHROOM_LIBRARY.map(kind => ({ kind: kind.kind, dn: kind.item().dn, rarity: kind.item().rarity }))

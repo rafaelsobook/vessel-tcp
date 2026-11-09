@@ -11,11 +11,12 @@ import { randNumString } from "../tools/tools"
 // botType maps onto characterclass names the game already uses
 // (server/models/charDetM.js carries warbringer/runecaller alongside
 // duskrunner/berserker/paladin/necromancer):
-//   "warbringer" - close combat. Plate, helms, pauldrons, gauntlets.
+//   "warbringer" - close combat. Plate, helms, pauldrons, gauntlets, kneeguards.
 //   "runecaller" - caster. Hats and light robes, never plate.
 //
 // Every name/modelName below is a REAL item that renders - verified against
-// avatar.glb (armor.*/boots.*), helmets.glb, pauldrons.glb and gauntlets.glb.
+// avatar.glb (armor.*/boots.*), helmets.glb, pauldrons.glb, gauntlets.glb and
+// kneearmors.glb.
 // They are hand-mirrored from client/src/charactersystem/inventory.js's own
 // "give all items" catalogue and npcDetails.js's NPC gear, because tcp is a
 // separate node project and cannot import from client/. If an item is
@@ -111,7 +112,7 @@ type TBotItemTemplate = {
     // the pauldron is "Pauldron" here and not "Iron Pauldron" as it reads in
     // Bram's shop: the shop sells one fixed iron version, these roll.
     dn: string
-    itemType: "helmet" | "armor" | "pauldron" | "boots" | "gauntlet"
+    itemType: "helmet" | "armor" | "pauldron" | "boots" | "gauntlet" | "kneearmor"
     modelName?: string
     hairVisible?: boolean
     // metal-tinted gear only. A cloth hat has no metal to tint -
@@ -135,6 +136,7 @@ export const WARBRINGER_ITEMS: TBotItemTemplate[] = [
     { name: "orionhelm", modelName: "orionhelm", dn: "Orion Helm", itemType: "helmet", metalTinted: true, def: 18, resistance: 12, price: 32, rarity: "rare" },
     { name: "ironmask", modelName: "ironmask", dn: "Mask", itemType: "helmet", metalTinted: true, hairVisible: true, def: 14, resistance: 8, price: 25, rarity: "rare" },
     { name: "gauntler", dn: "Gauntlet", itemType: "gauntlet", metalTinted: true, def: 10, resistance: 6, price: 22, rarity: "rare" },
+    { name: "braveknee", dn: "Brave Kneeguard", itemType: "kneearmor", metalTinted: true, def: 12, resistance: 6, price: 26, rarity: "rare" },
     { name: "leatherboots", dn: "Leather Boots", itemType: "boots", def: 0, resistance: 5, price: 9, rarity: "common" },
 ]
 
@@ -199,7 +201,25 @@ function rollMetalColor(botLvl: number): string {
  * createcharacter.js and equiped-item paths need no special handling.
  */
 export function buildBotItem(template: TBotItemTemplate, botLvl: number = 1){
-    const metalColor = template.metalTinted ? rollMetalColor(botLvl) : undefined
+    const item = buildEquipableItem(template, template.metalTinted ? rollMetalColor(botLvl) : undefined)
+    return {
+        ...item,
+        itemId: `bot-item-${randNumString()}`,
+        equiped: true,
+        // read only by the level-up broadcast, so it knows whether this one
+        // is worth telling the whole server about
+        _announce: ANNOUNCE_RARITIES.includes(item.rarity as TMetalRarity),
+    }
+}
+
+/**
+ * A template made in the given metal (METAL_TIERS key), unequipped - shared by
+ * the bots above and the guild board's contract rewards (quests.ts), which
+ * pick their own metal instead of rolling one. No metal (or an untinted piece
+ * like leather boots) keeps the template's own stats, price and rarity.
+ */
+export function buildEquipableItem(template: TBotItemTemplate, metalColor?: string){
+    if(!template.metalTinted) metalColor = undefined
     const tier = metalColor ? METAL_TIERS[metalColor] : undefined
 
     const def = tier ? Math.round(template.def * tier.defMult) : template.def
@@ -211,7 +231,7 @@ export function buildBotItem(template: TBotItemTemplate, botLvl: number = 1){
     const dn = tier ? `${tier.prefix} ${template.dn}` : template.dn
 
     return {
-        itemId: `bot-item-${randNumString()}`,
+        itemId: randNumString(),
         name: template.name,
         modelName: template.modelName,
         dn,
@@ -220,7 +240,7 @@ export function buildBotItem(template: TBotItemTemplate, botLvl: number = 1){
         weaponType: undefined,
         equipAbilities: { dmg: 0, def, resistance, magicDmg: 0, plusStr: 0, plusDex: 0, plusInt: 0 },
         consumeAbilities: { plusHp: 0, plusMp: 0, plusSp: 0, plusDmg: 0, plusSpd: 0 },
-        equiped: true,
+        equiped: false,
         soulFeed: 0,
         isEnhanceAble: true,
         enhancedLevel: 0,
@@ -231,9 +251,6 @@ export function buildBotItem(template: TBotItemTemplate, botLvl: number = 1){
         rarity,
         metalColor,
         hairVisible: template.hairVisible,
-        // read only by the level-up broadcast, so it knows whether this one
-        // is worth telling the whole server about
-        _announce: ANNOUNCE_RARITIES.includes(rarity as TMetalRarity),
     }
 }
 

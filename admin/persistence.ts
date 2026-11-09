@@ -8,22 +8,24 @@ import { adminKeyForServices } from "./auth"
 // own and the host's disk doesn't last, so the REST server (which already has
 // Mongo) keeps one document for it - server/routes/adminR.js. What's kept is
 // only what an admin chose to keep: the spawn points of enemies, the chests,
-// grains and mushrooms they placed with "keep" on. The data files stay the
+// grains, mushrooms and ores they placed with "keep" on. The data files stay the
 // source for the base world.
 
 export type OverlayEnemy = { key: string, name: string, placeId: number, x: number, y: number, z: number, respawn: boolean }
 export type OverlayTreasure = { key: string, placeId: number, x: number, y: number, z: number, itemDetail: any }
 export type OverlayGrain = { key: string, placeId: number, x: number, y: number, z: number }
 export type OverlayMushroom = { key: string, placeId: number, kind: string, x: number, y: number, z: number }
+export type OverlayOre = { key: string, placeId: number, vein: string, x: number, y: number, z: number, rotation: number }
 export type Overlay = {
     enemies: OverlayEnemy[]
     treasures: OverlayTreasure[]
     grains: OverlayGrain[]
     mushrooms: OverlayMushroom[]
+    ores: OverlayOre[]
 }
 export type OverlayKind = keyof Overlay
 
-const emptyOverlay = (): Overlay => ({ enemies: [], treasures: [], grains: [], mushrooms: [] })
+const emptyOverlay = (): Overlay => ({ enemies: [], treasures: [], grains: [], mushrooms: [], ores: [] })
 
 // Where the REST server is. API_URL wins; on Render it falls back to the
 // production REST server, anywhere else to a local one - so a tcp running on

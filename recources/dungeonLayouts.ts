@@ -20,7 +20,9 @@ const DUNGEON_12 = generateBSPDungeon({
     cellSize: 4,
     wallHeight: 15,
     corridorWidth: 3,
-    bossRoomWidthScale: 2,
+    // 5, as the client's (dungeons.js) - it was 2 here while the client had
+    // moved to 5, and every room came out different on the two sides
+    bossRoomWidthScale: 5,
 })
 
 export const DUNGEONS = new Map<number, any>([[12, DUNGEON_12]])

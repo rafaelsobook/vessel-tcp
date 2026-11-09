@@ -27,6 +27,19 @@ export function getDayNightState(){
     return { timeOfDay: getTimeOfDay(), dayLengthMs: DAY_LENGTH_MS }
 }
 
+// Whether it is night - MIRROR of client/src/components/dayNightSystem.js's
+// isNightNow (its sunState and SUN_SET_HEIGHT/SUN_UP_HEIGHT): the sun well
+// down, a quarter of full daylight or less. Keep the two identical, or the
+// server will call it night (the undead rising twice as strong) while every
+// client still shows dusk.
+const SUN_SET_HEIGHT = -0.08
+const SUN_UP_HEIGHT = 0.3
+export function isNightTime(): boolean {
+    const height = Math.sin((getTimeOfDay() - 0.25) * Math.PI * 2)
+    const t = Math.min(1, Math.max(0, (height - SUN_SET_HEIGHT) / (SUN_UP_HEIGHT - SUN_SET_HEIGHT)))
+    return t * t * (3 - 2 * t) < 0.25
+}
+
 // debug/admin path - jumps the world clock to timeOfDay (0..1). Returns null
 // for anything outside that range, since the caller passes a client-supplied
 // value through.

@@ -7,7 +7,7 @@ const generatebsp_1 = require("../generate-datas/generatebsp");
 exports.placesMD = [
     (0, generatebsp_1.generateBSPDungeon)({
         placeId: "dungeon101",
-        areaType: "dungeon",
+        // (no areaType - generateBSPDungeon always outputs "dungeon")
         seed: 12345,
         rockDensity: 0,
         gridWidth: 32,

@@ -141,5 +141,6 @@ export const celestineOreLoot = {
     qnty: 1,
     price: { coinType: "bronze", pieces: 15 },
     desc: "A shard of Celestine Ore, prized by enchanters.",
+    hardness: 28, // resourceLoot.js celestineore
     rarity: "rare"
 }

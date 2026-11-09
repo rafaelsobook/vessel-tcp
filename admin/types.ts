@@ -12,6 +12,7 @@ export interface AdminWorld {
     treasures: any[]
     grains: any[]
     mushrooms: any[]
+    ores: any[]
     readonly bonfires: any[]
     readonly trunks: any[]
     readonly structures: any[]

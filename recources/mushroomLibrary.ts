@@ -1,9 +1,9 @@
 import { randNumString } from "../tools/tools"
 
-// Every kind of mushroom that grows in the dungeons - where it may grow, how
-// often, and what you get for picking it. mushroomsInDungeon.ts rolls a kind
-// per cluster from here; index.ts's "pickupMushroom" hands the picker this
-// kind's item. The server is the only one that knows the items - a client
+// Every kind of mushroom that grows in the dungeons and out in the open world -
+// where it may grow, how often, and what you get for picking it.
+// mushroomsInDungeon.ts and mushroomsInOpenworld.ts roll a kind per cluster
+// from here; index.ts's "pickupMushroom" hands the picker this kind's item. The server is the only one that knows the items - a client
 // gets one back for each mushroom it actually took, never for one someone
 // else got to first.
 //
@@ -15,7 +15,8 @@ export type TmushroomKind = {
     // relative chance against the other kinds allowed at the same spot
     weight: number
     // how deep into the dungeon it starts growing: 0 = from the entrance on,
-    // 1 = only the very furthest floor from it (by walking distance)
+    // 1 = only the very furthest floor from it (by walking distance). In the
+    // open world, how far out from the spawn (mushroomsInOpenworld.ts)
     minDepth: number
     // a fresh, ready-to-obtain() item every call
     item: () => any

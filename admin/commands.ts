@@ -1,10 +1,11 @@
 import { randNumString } from "../tools/tools"
 import { AdminContext, fail } from "./types"
-import { ENEMY_KINDS, enemyKind, PLACES, placeById, ITEM_PRESETS, itemPreset, MUSHROOM_KINDS } from "./catalog"
+import { ENEMY_KINDS, enemyKind, PLACES, placeById, ITEM_PRESETS, itemPreset, MUSHROOM_KINDS, ORE_VEINS } from "./catalog"
 import { DUNGEONS } from "../recources/dungeonLayouts"
 import { OPENWORLD_SLIME_TERRITORY } from "../recources/enemyDetails"
 import { createTreasure } from "../recources/treasures"
 import { rollMushroomKind } from "../recources/mushroomLibrary"
+import { makeOre, VEINS } from "../recources/ores"
 import { setWeather, getWeatherState, WEATHER_TYPES } from "../recources/weather"
 import { setTimeOfDay, getDayNightState } from "../recources/dayNight"
 import { ground, scatter, homeRoomFor, round2 } from "./geo"
@@ -85,7 +86,8 @@ function stamp(entity: any, keep: boolean) {
     entity.keep = keep
     return entity.adminKey as string
 }
-function forget(kind: "enemies" | "treasures" | "grains" | "mushrooms", entity: any) {
+function forget(kind: "enemies" | "treasures" | "grains" | "mushrooms" | "ores" | null, entity: any) {
+    if (!kind) return
     if (entity.adminKey && entity.keep) store.remove(kind, entity.adminKey)
 }
 
@@ -244,11 +246,38 @@ function addMushrooms(ctx: AdminContext, p: any) {
     return { added: added.length }
 }
 
-// list / remove / clear for the three kinds share one shape
+// ore deposits an admin puts down - a vein, its hit points, standing like tcp's
+// own (recources/ores.ts); one worked out is gone, an hour later a fresh one
+// stands there (index.ts). With "keep" it's also saved (persistence.ts) and put
+// back after a restart.
+function addOres(ctx: AdminContext, p: any) {
+    const at = where(ctx, p)
+    const count = int(p.count ?? 1, "count", 1, 50)
+    const radius = num(p.radius ?? 3, "radius", 0, 500)
+    const keep = flag(p.keep)
+    const wanted = text(p.vein, "ore vein", 40)
+    if (!(wanted in VEINS)) fail("unknown ore vein")
+    const added: any[] = []
+    const taken = new Set<string>()
+    for (let i = 0; i < count; i++) {
+        const pt = scatter(at.x, at.z, radius)
+        const spot = ground(at.placeId, pt.x, pt.z, taken)
+        const ore: any = makeOre(wanted, { x: spot.x, y: spot.y, z: spot.z }, at.placeId)
+        const key = stamp(ore, keep)
+        if (keep) store.add("ores", { key, placeId: at.placeId, vein: wanted, x: ore.pos.x, y: ore.pos.y, z: ore.pos.z, rotation: ore.rotation })
+        added.push(ore)
+    }
+    ctx.world.ores.push(...added)
+    ctx.io.emit("ore-added", added)
+    return { added: added.length }
+}
+
+// list / remove / clear for the kinds share one shape
 const PICKUPS = {
     treasures: { list: (w: AdminContext["world"]) => w.treasures, idField: "itemId", removedEvent: "treasure-removed", store: "treasures" as const },
     grains: { list: (w: AdminContext["world"]) => w.grains, idField: "grainId", removedEvent: "grain-removed", store: "grains" as const },
     mushrooms: { list: (w: AdminContext["world"]) => w.mushrooms, idField: "mushroomId", removedEvent: "mushroom-removed", store: "mushrooms" as const },
+    ores: { list: (w: AdminContext["world"]) => w.ores, idField: "oreId", removedEvent: "ore-removed", store: "ores" as const },
 }
 type PickupKind = keyof typeof PICKUPS
 const pickupKind = (value: unknown): PickupKind => (typeof value === "string" && value in PICKUPS ? value as PickupKind : fail("unknown kind"))
@@ -262,7 +291,7 @@ function listPickups(ctx: AdminContext, p: any) {
         total: rows.length,
         rows: rows.slice(0, MAX_LIST).map((item: any) => ({
             id: item[def.idField], placeId: item.currentPlaceId, x: round2(item.pos.x), z: round2(item.pos.z),
-            label: kind === "treasures" ? `${item.itemDetail?.dn ?? "?"}${item.itemDetail?.qnty > 1 ? " x" + item.itemDetail.qnty : ""}` : kind === "mushrooms" ? item.kind : "grain",
+            label: kind === "treasures" ? `${item.itemDetail?.dn ?? "?"}${item.itemDetail?.qnty > 1 ? " x" + item.itemDetail.qnty : ""}` : kind === "mushrooms" ? item.kind : kind === "ores" ? `${item.vein} ore (${item.color}) - ${item.hp}/${item.maxHp} hp` : "grain",
             admin: !!item.adminKey, keep: !!item.keep,
         })),
     }
@@ -400,6 +429,7 @@ function mapOf(ctx: AdminContext, p: any) {
         treasures: w.treasures.filter(inPlace).map(t => ({ id: t.itemId, x: round2(t.pos.x), z: round2(t.pos.z), label: t.itemDetail?.dn ?? "chest" })),
         grains: w.grains.filter(inPlace).slice(0, 2500).map(g => ({ id: g.grainId, x: round2(g.pos.x), z: round2(g.pos.z) })),
         mushrooms: w.mushrooms.filter(inPlace).slice(0, 2500).map(m => ({ id: m.mushroomId, x: round2(m.pos.x), z: round2(m.pos.z), kind: m.kind })),
+        ores: w.ores.filter(inPlace).slice(0, 2500).map(o => ({ id: o.oreId, x: round2(o.pos.x), z: round2(o.pos.z), vein: o.vein, color: o.color, hp: o.hp, maxHp: o.maxHp })),
         structures: [
             ...w.bonfires.filter(inPlace).map(s => ({ x: round2(s.pos.x), z: round2(s.pos.z), kind: "bonfire" })),
             ...w.trunks.filter(inPlace).map(s => ({ x: round2(s.pos.x), z: round2(s.pos.z), kind: "log" })),
@@ -418,6 +448,7 @@ export const COMMANDS: Record<string, Command> = {
             places: PLACES,
             items: ITEM_PRESETS.map(({ key, label }) => ({ key, label })),
             mushrooms: MUSHROOM_KINDS,
+            ores: ORE_VEINS,
             weather: WEATHER_TYPES,
         }),
     },
@@ -450,6 +481,7 @@ export const COMMANDS: Record<string, Command> = {
     "pickups.list": { audit: false, run: listPickups },
     "treasures.place": { audit: true, run: placeTreasures, describe: (p, r) => `${r.placed} chest of ${p.preset}${flag(p.keep) ? ", kept" : ""}` },
     "grains.add": { audit: true, run: addGrains, describe: (p, r) => `${r.added} grain${flag(p.keep) ? ", kept" : ""}` },
+    "ores.add": { audit: true, run: addOres, describe: (p, r) => `${r.added} ${p.vein} ore${flag(p.keep) ? ", kept" : ""}` },
     "mushrooms.add": { audit: true, run: addMushrooms, describe: (p, r) => `${r.added} ${p.kind ?? "random"} mushroom${flag(p.keep) ? ", kept" : ""}` },
     "pickups.remove": {
         audit: true,
@@ -542,6 +574,14 @@ export function restoreOverlay(ctx: AdminContext, saved: Overlay) {
     const mushrooms = saved.mushrooms.filter(entry => !haveKey(w.mushrooms, entry.key)).map(entry =>
         ({ mushroomId: randNumString(), kind: entry.kind, pos: { x: entry.x, y: entry.y, z: entry.z }, currentPlaceId: entry.placeId, adminKey: entry.key, keep: true }))
     if (mushrooms.length) { w.mushrooms.push(...mushrooms); ctx.io.emit("mushroom-added", mushrooms); restored += mushrooms.length }
+
+    const ores = (saved.ores ?? []).filter(entry => VEINS[entry.vein] && !haveKey(w.ores, entry.key)).map(entry => {
+        const ore: any = makeOre(entry.vein, { x: entry.x, y: entry.y, z: entry.z }, entry.placeId, entry.rotation)
+        ore.adminKey = entry.key
+        ore.keep = true
+        return ore
+    })
+    if (ores.length) { w.ores.push(...ores); ctx.io.emit("ore-added", ores); restored += ores.length }
 
     if (restored) console.log(`[admin] put ${restored} saved placements back into the world`)
 }

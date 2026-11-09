@@ -37,6 +37,9 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.enemyLengthsInPlace = void 0;
+// first of all: it copies the server's log for the admin page, and has to be in
+// place before `const log = console.log` below takes the function
+require("./admin/logTap");
 const http_1 = __importDefault(require("http"));
 const express_1 = __importDefault(require("express"));
 const cors_1 = __importDefault(require("cors"));
@@ -44,14 +47,27 @@ const socket_io_1 = require("socket.io");
 const tools_1 = require("./tools/tools");
 const places_1 = require("./placedetails/places");
 const enemyDetails_1 = __importStar(require("./recources/enemyDetails"));
+const enemiesInDungeon_1 = require("./recources/enemiesInDungeon");
 const quests_1 = __importStar(require("./recources/quests"));
 const genenemy_1 = require("./generate-datas/genenemy");
 const treasures_1 = require("./recources/treasures");
+const pickupClaims_1 = require("./recources/pickupClaims");
+const treasuresInDungeon_1 = require("./recources/treasuresInDungeon");
+const hiddenHoards_1 = require("./recources/hiddenHoards");
 const grains_1 = require("./recources/grains");
+const mushroomsInDungeon_1 = require("./recources/mushroomsInDungeon");
+const mushroomsInOpenworld_1 = require("./recources/mushroomsInOpenworld");
+const ores_1 = require("./recources/ores");
+const mushroomLibrary_1 = require("./recources/mushroomLibrary");
 const npcBrain_1 = require("./recources/npcBrain");
 const botItems_1 = require("./recources/botItems");
 const weather_1 = require("./recources/weather");
+const dayNight_1 = require("./recources/dayNight");
+const undead_1 = require("./recources/undead");
 const faker_1 = require("@faker-js/faker");
+const castles_1 = require("./recources/castles");
+const witchTowers_1 = require("./recources/witchTowers");
+const admin_1 = require("./admin");
 exports.enemyLengthsInPlace = [
     {
         placeId: 1,
@@ -110,11 +126,28 @@ let spawnBotsEnabled = false;
 let obstaclesByPlace = {};
 let tcpEnemies = enemyDetails_1.default;
 let quests = quests_1.default;
-let treasures = treasures_1.startingTreasures;
+// the village's chests, the dungeons' (treasuresInDungeon.ts) and the open
+// world's hidden places' hoards (hiddenHoards.ts)
+let treasures = [...treasures_1.startingTreasures, ...treasuresInDungeon_1.DUNGEON_TREASURES, ...hiddenHoards_1.HIDDEN_TREASURES];
 let bonfires = [];
 let trunks = [];
+let structures = [];
 let grains = grains_1.startingGrains;
-let struckWeapons = [];
+// mushrooms on the dungeon floors (mushroomsInDungeon.ts) and out in the open
+// world (mushroomsInOpenworld.ts) - picked like grains. What each kind is and
+// gives: MUSHROOM_LIBRARY (recources/mushroomLibrary.ts) -
+// orange/brown/swamp/white everywhere (white rarer, and poisonous),
+// purple/bluemist/crimson/galaxygreen/devilred only deeper in (or further out)
+let mushrooms = [...mushroomsInDungeon_1.DUNGEON_MUSHROOMS, ...mushroomsInOpenworld_1.OPENWORLD_MUSHROOMS, ...hiddenHoards_1.HIDDEN_MUSHROOMS];
+console.log(`[mushrooms] ${mushrooms.length} placed, ${mushroomLibrary_1.MUSHROOM_LIBRARY.length} kinds:`, mushroomLibrary_1.MUSHROOM_LIBRARY.map(k => `${k.kind} ${mushrooms.filter(m => m.kind === k.kind).length}`).join(", "));
+// ore deposits (recources/ores.ts) - the village's, the dungeons', the open
+// world's. Each has hit points; a pickaxe swing ("mineOre") takes one, and at
+// 0 it's gone for good (until the next server start)
+let ores = ores_1.startingOres;
+console.log(`[ores] ${ores.length} placed:`, Object.entries(ores.reduce((by, ore) => (by[ore.vein] = (by[ore.vein] ?? 0) + 1, by), {})).map(([vein, n]) => `${vein} ${n}`).join(", "));
+// players' - and the hidden places' (hiddenHoards.ts), struck into their floors
+let struckWeapons = [...hiddenHoards_1.HIDDEN_WEAPONS];
+console.log(`[hidden hoards] ${(0, hiddenHoards_1.describeHoards)()}`);
 // enemy._id -> a per-bind counter, only used by the enemyBind handler below
 // (skill.enemyBind) - lets a second bind landing on an already-bound enemy
 // supersede the first one's timer instead of racing it: only the MOST
@@ -176,6 +209,42 @@ function logEnemyKill(enemyTarg, killerId) {
     const kind = bots.some(b => b.player.owner === killerId) ? "bot" : "player";
     log(`[kill] ${enemyName} killed by ${killer.name} lvl ${killer.lvl} (${kind})`);
 }
+// A killed enemy comes back - fresh, where it first stood (origPos) -
+// respawnDetails.respawnTime later. Run here, on the server, the moment
+// applyDamageToEnemy sees it die, whoever or whatever killed it (a player, a
+// bot, a burn tick, its own curse): it used to hang off the killer's client
+// emitting "respawnEnemy" with its own copy of the enemy, which had been
+// commented out (createEnemy.js's defeatedAmonster), so nothing came back
+// until a restart. Enemies with willRespawn false - the openworld's
+// topped-up extras - don't; the top-up replaces them on its own.
+// picked grain and mushrooms grow back where they were, this long after
+const GRAIN_REGROW_MS = 5 * 60 * 1000;
+const MUSHROOM_REGROW_MS = 10 * 60 * 1000;
+function respawnLater(dead) {
+    const details = dead.respawnDetails;
+    if (!details || details.willRespawn === false)
+        return;
+    const origin = dead.origPos ?? { x: dead.x, y: dead.y, z: dead.z };
+    setTimeout(() => {
+        tcpEnemies.push({
+            ...dead,
+            _id: (0, tools_1.randNumString)(),
+            hp: dead.maxHp,
+            x: origin.x,
+            y: origin.y ?? dead.y,
+            z: origin.z,
+            _isMoving: false,
+            _targetId: false,
+            _dirTarg: { x: 0, y: 0, z: 0 },
+            _attacking: false,
+            _disabled: false,
+            _cursed: false,
+            _eatingUntil: 0,
+            _dodgeCooldownUntil: 0,
+        });
+        io.emit("enemy-respawned", tcpEnemies);
+    }, details.respawnTime);
+}
 // the ONE place enemy hp actually gets mutated - originally inline inside
 // the "enemyIsHit" socket handler below, pulled out so recources/npcBrain.ts's
 // own bot combat (BOT PLAYERS block further down) can deal REAL damage
@@ -203,7 +272,7 @@ function applyDamageToEnemy(data) {
     // shapes land here). Consumed below by physicalImmune (genenemy.ts's
     // ghostBase) - the only per-enemy physical/magic distinction so far; no
     // enemy has a def field at all.
-    const { isPhysicalDmg, physicalDmg, weaponDmg, magicDmg, accuracy, isCritical, weaponType } = dmgDetails;
+    const { isPhysicalDmg, isPurify, physicalDmg, weaponDmg, magicDmg, accuracy, isCritical, weaponType, elements } = dmgDetails;
     const enemyTarg = tcpEnemies.find(ene => ene._id === targetId);
     if (!enemyTarg) {
         // same shape "removeEnemy"'s own handler already broadcasts
@@ -230,13 +299,24 @@ function applyDamageToEnemy(data) {
     // instead of a damage number. `as any` - only some enemy shapes in
     // tcpEnemies declare this field, same reason the openworld top-up
     // below already reaches for (newSlime as any).territory.
-    const isImmune = !!isPhysicalDmg && !!enemyTarg.physicalImmune;
-    const dmgToApply = isImmune ? 0 : (weaponDmg ? weaponDmg : physicalDmg);
+    // ...unless the weapon carries an element (the client's
+    // itemDictionary.js weaponElements - the Majestic Sword's phoenix fire):
+    // that cuts what plain steel can't
+    const isElemental = Array.isArray(elements) && elements.length > 0;
+    const isImmune = !!isPhysicalDmg && !!enemyTarg.physicalImmune && !isElemental;
+    // the Purification skill (client skillEffects.js's spawnPurificationCircle)
+    // sends isPurify with no damage of its own - a purifiable enemy (ghosts,
+    // genenemy.ts) takes exactly its remaining hp, decided here rather than
+    // by the client, so a purify hit can't be stretched onto anything else
+    const dmgToApply = isImmune ? 0
+        : isPurify ? (enemyTarg.purifiable ? Math.max(0, enemyTarg.hp) : 0)
+            : (weaponDmg ? weaponDmg : physicalDmg);
     enemyTarg.hp -= dmgToApply;
     const isLethal = enemyTarg.hp <= 0;
     if (isLethal) {
         tcpEnemies = tcpEnemies.filter(enemy => enemy._id !== targetId);
         logEnemyKill(enemyTarg, data.playerId);
+        respawnLater(enemyTarg);
     }
     // {...data, ...} is what carries a hit weapon's own effectsWhenHit
     // (client's characterstate.js dealDamageToEnemy, e.g. the Majestic
@@ -394,6 +474,17 @@ function releaseServantsOf(ownerId) {
         io.emit("bot-servant-updated", { botOwnerId: b.player.owner, servantOfOwnerId: null });
     });
 }
+// THE UNDEAD (recources/undead.ts) - rise in the fog and come for the real
+// players in the open world. They keep their own list rather than living in
+// `players`, so nothing below that hunts, spawns around or counts players
+// ever mistakes one for a person; their events go out through emit.
+const isRealPlayer = (pl) => !!pl && !pl.owner?.startsWith("bot_");
+const undead = (0, undead_1.createUndeadDirector)({
+    emit: (event, data) => io.emit(event, data),
+    getPlayer: owner => players.find(pl => pl.owner === owner && isRealPlayer(pl)),
+    openworldPlayers: () => players.filter(pl => isRealPlayer(pl) && pl.currentPlace?.placeId === 888 && pl.pos),
+    isNight: dayNight_1.isNightTime,
+});
 io.on("connection", (socket) => {
     safeOn(socket, "join-world", (data, callback) => {
         // join-world fires every time the client loads a new place, not just
@@ -474,9 +565,14 @@ io.on("connection", (socket) => {
         // already carries treasures/bonfires instead of only their deltas.
         io.emit("userJoined", { currentPlaceId: data.currentPlace.placeId, newPlayerName: data.name,
             players, placesMD: places_1.placesMD, tcpEnemies, quests,
-            treasures, bonfires, trunks, grains, struckWeapons,
-            weather: (0, weather_1.getWeatherState)()
+            treasures, bonfires, trunks, structures, grains, mushrooms, ores, struckWeapons,
+            weather: (0, weather_1.getWeatherState)(),
+            dayNight: (0, dayNight_1.getDayNightState)()
         }); // always send the updated players count
+        // the undead already up, for whoever just walked into the open world -
+        // they are not in `players`, so the snapshot above never carries them
+        if (data.currentPlace?.placeId === 888)
+            socket.emit("undead-spawned", { undeads: undead.list() });
     });
     // client's inputMovement.js "v" debug key - flips the module-level
     // spawnBotsEnabled flag the BOT PLAYERS block's own setInterval (further
@@ -496,6 +592,17 @@ io.on("connection", (socket) => {
             return log(`[weather] ignored unknown weather "${data?.weather}"`);
         log(`[weather] forced -> ${applied}`);
         io.emit("weather-changed", (0, weather_1.getWeatherState)());
+        undead.onWeatherChanged(applied);
+    });
+    // debug/admin override for the world clock (recources/dayNight.ts) -
+    // jumps every client to the same timeOfDay (0 midnight .. 0.5 noon), same
+    // whole-world scope as "set-weather" just above
+    safeOn(socket, "set-time-of-day", (data) => {
+        const applied = (0, dayNight_1.setTimeOfDay)(data?.timeOfDay);
+        if (applied === null)
+            return log(`[daynight] ignored invalid timeOfDay "${data?.timeOfDay}"`);
+        log(`[daynight] forced -> ${applied.toFixed(3)}`);
+        io.emit("daynight-sync", (0, dayNight_1.getDayNightState)());
     });
     safeOn(socket, "toggle-spawn-bots", () => {
         spawnBotsEnabled = !spawnBotsEnabled;
@@ -588,6 +695,18 @@ io.on("connection", (socket) => {
         trunks.push(trunk);
         io.emit("trunk-crafted", trunk);
     });
+    // client's campcraft.js for any createstructure.js kind - same trust level
+    // and echo-to-everyone shape as "craft-trunk" right above
+    safeOn(socket, "craft-structure", data => {
+        const { placeId, position, craftId, kind, rotY } = data;
+        if (typeof kind !== "string" || !position)
+            return;
+        if (structures.some(st => st.craftId === craftId))
+            return;
+        const structure = { craftId, kind, pos: position, rotY: Number(rotY) || 0, currentPlaceId: placeId };
+        structures.push(structure);
+        io.emit("structure-crafted", structure);
+    });
     // client's assetcreation/creategroundweapon.js already rendered this
     // LOCALLY the instant the player struck it (struckItemFunc's "struck"
     // button, or a thrown spear's env-hit/enemy-hit case) - same
@@ -608,8 +727,19 @@ io.on("connection", (socket) => {
     // hardened anti-duplication lock, same trust level this whole server
     // already gives every other piece of loot).
     safeOn(socket, "pickup-struck-weapon", weaponId => {
+        (0, pickupClaims_1.releasePickup)("struckWeapon", weaponId);
+        const taken = struckWeapons.find(w => w.itemId === weaponId);
         struckWeapons = struckWeapons.filter(w => w.itemId !== weaponId);
         io.emit("struck-weapon-removed", weaponId);
+        // a hidden place's (hiddenHoards.ts) gets a fresh one later - only the
+        // pickup that actually found it starts that, as removeTreasure's chests
+        const respawn = taken && (0, hiddenHoards_1.hoardWeaponRespawnOf)(taken);
+        if (respawn)
+            setTimeout(() => {
+                const weapon = respawn.make();
+                struckWeapons.push(weapon);
+                io.emit("weapon-struck", weapon);
+            }, respawn.afterMs);
     });
     // WORLD CHAT - simple global relay, no rooms/parties. tcp has no db
     // access, so persistence happens client-side straight to the server's
@@ -647,13 +777,81 @@ io.on("connection", (socket) => {
         player.weaponBlocking = isBlocking;
         io.emit("emitted-weaponblock", data);
     });
+    // a player wore out or recovered (client's characterstate.js
+    // refreshTiredness) - stored like weaponBlocking above so anyone joining
+    // later gets it in the players list, and relayed so everyone already here
+    // switches that player's walk/stand clips (client's sockets/renderer.js)
+    safeOn(socket, "emitTired", data => {
+        const { ownerId, isTired } = data;
+        const player = players.find(user => user.owner === ownerId);
+        if (!player)
+            return;
+        player.isTired = !!isTired;
+        io.emit("emitted-tired", data);
+    });
+    // a player started or stopped bleeding (client's characterstate.js
+    // refreshBleeding) - stored and relayed exactly like emitTired above, so
+    // everyone switches that player's blood splatter on or off
+    safeOn(socket, "emitBleeding", data => {
+        const { ownerId, isBleeding } = data;
+        const player = players.find(user => user.owner === ownerId);
+        if (!player)
+            return;
+        player.isBleeding = !!isBleeding;
+        io.emit("emitted-bleeding", data);
+    });
+    // a player started evolving (client's evolution.js) - stored, so whoever
+    // joins later meets them already changed, and relayed so everyone here
+    // sees the change happen
+    safeOn(socket, "emitEvolve", data => {
+        const { ownerId, evolution } = data;
+        const player = players.find(user => user.owner === ownerId);
+        if (!player || !evolution)
+            return;
+        // no name at all: they turned back into a human
+        if (evolution.evolutionName === null) {
+            player.evolution = undefined;
+            io.emit("emitted-evolve", data);
+            return;
+        }
+        if (typeof evolution.evolutionName !== "string")
+            return;
+        player.evolution = evolution;
+        io.emit("emitted-evolve", data);
+    });
+    // a player's flex aura grew while it was up (client's characterstate.js
+    // refreshMyAura) - stored and relayed like emitBleeding above, so everyone
+    // redraws it at its new strength
+    safeOn(socket, "emitAura", data => {
+        const { ownerId, aura } = data;
+        const player = players.find(user => user.owner === ownerId);
+        if (!player || !aura)
+            return;
+        player.aura = aura;
+        io.emit("emitted-aura", data);
+    });
+    // the Tab list's "Distance Traveled": a player's farthest from the openworld's
+    // spawn grew (client's travelRecord.js). Stored for whoever joins later and relayed
+    // so every open list shows it. Only ever raised, and only by that player's own socket
+    safeOn(socket, "emitTravel", data => {
+        const { ownerId, maxDistanceTraveled } = data;
+        const player = players.find(user => user.owner === ownerId);
+        if (!player || player.socketId !== socket.id)
+            return;
+        if (!Number.isFinite(maxDistanceTraveled) || maxDistanceTraveled <= (player.maxDistanceTraveled ?? 0))
+            return;
+        player.maxDistanceTraveled = maxDistanceTraveled;
+        io.emit("emitted-travel", { ownerId, maxDistanceTraveled });
+    });
     // client's charactersystem/seating.js - the sitter already sat down on
     // their own screen the moment they pressed interact (same act-first
     // trust level as everything else here). This is only where two players
     // racing for the same seat get settled: first claim wins, the other gets
     // "sit-rejected" and stands back up on their own client.
     safeOn(socket, "sit-down", data => {
-        const { ownerId, placeId, seatId } = data;
+        // pose - "sitting" on a chair/log, "sleeping" in a tent's bed (the
+        // client's seating.js); it's the mode anyone joining later sees them in
+        const { ownerId, placeId, seatId, pose } = data;
         const player = players.find(user => user.owner === ownerId);
         if (!player)
             return;
@@ -664,7 +862,7 @@ io.on("connection", (socket) => {
         if (player.seat)
             io.emit("player-stood", { ownerId, ...player.seat });
         player.seat = { placeId, seatId };
-        player.mode = "sitting";
+        player.mode = pose === "sleeping" ? "sleeping" : "sitting";
         io.emit("player-sat", { ownerId, placeId, seatId });
     });
     safeOn(socket, "stand-up", data => {
@@ -735,6 +933,8 @@ io.on("connection", (socket) => {
         player.pos.z = pos.z;
         player.dirTarg = dirTarg;
         io.emit("player-attacked", data);
+        // any undead close in front of the swing may roll out of it or block
+        undead.onPlayerSwing(owner, pos, dirTarg);
     });
     safeOn(socket, "activate-skill", data => {
         const { ownerId, skill, currentPlaceId } = data;
@@ -747,6 +947,9 @@ io.on("connection", (socket) => {
                     if (skl.name === skill.name)
                         skl.isActive = skill.isActive;
                 });
+                // its strength, for anyone who joins while it's up
+                if (data.aura)
+                    player.aura = data.aura;
                 break;
             default:
                 break;
@@ -813,10 +1016,18 @@ io.on("connection", (socket) => {
             return log(`no valid quest ${questId}`);
         if (targetQuest.claimed) {
             log(`quest ${questId} already claimed, rejecting ${ownerId}`);
-            io.emit("quest-claim-result", { ownerId, questId, currentPlaceId, success: false });
+            io.emit("quest-claim-result", { ownerId, questId, currentPlaceId, success: false, reason: "taken" });
+            return;
+        }
+        // one contract per player - the client checks its own inventory first,
+        // this is what holds if it didn't
+        if (quests.some(q => q.claimedBy === ownerId)) {
+            log(`${ownerId} already holds a contract, rejecting quest ${questId}`);
+            io.emit("quest-claim-result", { ownerId, questId, currentPlaceId, success: false, reason: "hasContract" });
             return;
         }
         targetQuest.claimed = true;
+        targetQuest.claimedBy = ownerId;
         log(`${ownerId} claimed quest ${questId}`);
         io.emit("quest-claim-result", { ownerId, questId, currentPlaceId, success: true, quest: targetQuest });
     });
@@ -826,14 +1037,14 @@ io.on("connection", (socket) => {
         if (!targetQuest)
             return log(`no valid quest ${questId}`);
         targetQuest.claimed = false;
+        targetQuest.claimedBy = null;
         log(`${ownerId} cancelled quest ${questId}`);
         io.emit("quest-cancelled", { ownerId, questId, currentPlaceId, quest: targetQuest });
     });
     // fired once the player turns the finished quest in (client already
     // checked completion and granted the reward) - this just retires it from
-    // the board's pool for good and, if that drops f-rank quests (like the
-    // slime ones) below F_RANK_QUEST_COUNT, tops the pool back up so it never
-    // drifts above or below that count
+    // the board's pool for good and hangs a new contract of the same rank in
+    // its spot, so each board keeps its mix of ranks (quests.ts's BOARD_SLOTS)
     safeOn(socket, "emitCompleteQuest", data => {
         const { ownerId, questId, currentPlaceId } = data;
         const targetQuest = quests.find(q => q.questId === questId);
@@ -841,13 +1052,10 @@ io.on("connection", (socket) => {
             return log(`no valid quest ${questId}`);
         quests = quests.filter(q => q.questId !== questId);
         log(`${ownerId} completed quest ${questId}`);
-        if (targetQuest.requiredRank.rankLabel === "f") {
-            const fRankCount = quests.filter(q => q.requiredRank.rankLabel === "f").length;
-            if (fRankCount < quests_1.F_RANK_QUEST_COUNT) {
-                const newQuest = (0, quests_1.createSlaySlimesQuest)(2, targetQuest.pos);
-                quests.push(newQuest);
-                io.emit("quest-spawned", { currentPlaceId, quest: newQuest });
-            }
+        const newQuest = (0, quests_1.createContract)(targetQuest.requiredRank.rankLabel, targetQuest.pos);
+        if (newQuest) {
+            quests.push(newQuest);
+            io.emit("quest-spawned", { currentPlaceId, quest: newQuest });
         }
     });
     //enemy related
@@ -877,6 +1085,10 @@ io.on("connection", (socket) => {
     // this new event name instead of pretending an enemy attacked them.
     safeOn(socket, "playerIsHit", data => {
         const rawDmg = data.dmgDetails.weaponDmg ? data.dmgDetails.weaponDmg : data.dmgDetails.physicalDmg;
+        // a blow on one of the undead (recources/undead.ts) - it takes it from
+        // there, dodges and blocks included, and broadcasts the result itself
+        if (undead.takeHit(data.targetId, rawDmg, data.playerId, false, { isCritical: !!data.dmgDetails?.isCritical, effectsWhenHit: data.effectsWhenHit }))
+            return;
         // a bot target soaks this through whatever armour it has earned;
         // a real player target gets it back unchanged (see mitigatedBotDamage)
         const dmgToApply = mitigatedBotDamage(data.targetId, rawDmg);
@@ -890,6 +1102,15 @@ io.on("connection", (socket) => {
         // notifyAttackedBy's own comment on why that guard has to exist.
         bots.find(b => b.player.owner === data.targetId)?.brain.notifyAttackedBy(data.playerId);
         io.emit("player-is-hit", { ...data, dmgToApply });
+    });
+    // a player's spell landing on one of the undead - only the caster's own
+    // client sends this (client/src/enemies/undead.js's spell guard), magic
+    // damage, so armour and a raised guard do not soak it
+    safeOn(socket, "undeadIsHit", data => {
+        const dmg = Number(data?.dmg);
+        if (!(dmg > 0))
+            return;
+        undead.takeHit(data.targetId, dmg, data.playerId, true);
     });
     // skill.enemyBind (see client's skillsData.js radiantjudgmentSkill and
     // skillEffects.js's hit handler) - bindChance was already rolled
@@ -951,24 +1172,8 @@ io.on("connection", (socket) => {
         });
         io.emit("enemy-changedtarget", data);
     });
-    safeOn(socket, "respawnEnemy", data => {
-        const { maxHp, name, respawnDetails } = data;
-        if (respawnDetails.willRespawn === false)
-            return;
-        data._id = (0, tools_1.randNumString)();
-        setTimeout(() => {
-            tcpEnemies.push({ ...data,
-                hp: maxHp,
-                _isMoving: false,
-                _targetId: undefined,
-                _dirTarg: { x: 0, z: 0 },
-                _attacking: false,
-                _disabled: false,
-                _cursed: false,
-            });
-            io.emit("enemy-respawned", tcpEnemies);
-        }, respawnDetails.respawnTime);
-    });
+    // (respawning is the server's own job now - respawnLater, called when an
+    // enemy dies in applyDamageToEnemy - not a client's "respawnEnemy")
     safeOn(socket, "removeEnemy", enemyId => {
         tcpEnemies = tcpEnemies.filter(enemy => enemy._id !== enemyId);
         console.log("enemy removed ", enemyId);
@@ -986,17 +1191,112 @@ io.on("connection", (socket) => {
     // gone. Client-authoritative, same trust level this whole server
     // already gives combat/loot (see enemyIsHit's own comment on misses
     // never being seen here either) - not a hardened anti-duplication lock.
+    // PICKUP CLAIMS (recources/pickupClaims.ts) - asked before a client's
+    // pickup bar starts (components/timedPickup.js): yes only if the thing's
+    // still here and nobody else is already taking it, and then it's held for
+    // that player while the bar fills. Answered through socket.io's
+    // acknowledgement. kind: which list it's in.
+    const PICKUP_KINDS = {
+        treasure: id => treasures.some(t => t.itemId === id),
+        grain: id => grains.some(g => g.grainId === id),
+        mushroom: id => mushrooms.some(m => m.mushroomId === id),
+        struckWeapon: id => struckWeapons.some(w => w.itemId === id),
+    };
+    safeOn(socket, "claimPickup", (data, ack) => {
+        const reply = typeof ack === "function" ? ack : () => { };
+        const { kind, id, owner, ms } = data ?? {};
+        const exists = PICKUP_KINDS[kind];
+        if (!exists || !id || !owner)
+            return reply({ ok: false, reason: "unknown" });
+        if (!exists(id))
+            return reply({ ok: false, reason: "gone" });
+        reply((0, pickupClaims_1.claimPickup)(kind, id, owner, ms) ? { ok: true } : { ok: false, reason: "taken" });
+    });
+    // a client giving up on a pickup before its bar filled (walked off, died)
+    safeOn(socket, "releasePickup", data => {
+        const { kind, id, owner } = data ?? {};
+        if (kind && id)
+            (0, pickupClaims_1.releasePickup)(kind, id, owner);
+    });
     safeOn(socket, "removeTreasure", treasureId => {
+        (0, pickupClaims_1.releasePickup)("treasure", treasureId);
+        const opened = treasures.find(treasure => treasure.itemId === treasureId);
         treasures = treasures.filter(treasure => treasure.itemId !== treasureId);
         console.log("treasure removed ", treasureId);
         console.log("treasures ", treasures.length);
         io.emit("treasure-removed", treasureId);
+        // one that comes back (the village's supply chest) - only the call that
+        // actually found it starts that, so a double open can't bring back two
+        const respawn = opened && (0, treasures_1.respawnOf)(opened);
+        if (respawn)
+            setTimeout(() => {
+                const chest = respawn.make();
+                treasures.push(chest);
+                io.emit("treasure-added", [chest]);
+            }, respawn.afterMs);
     });
     // client's creategrain.js on pickup - same idempotent filter + bare
-    // io.emit shape as removeTreasure right above
+    // io.emit shape as removeTreasure right above. It grows back where it was
+    // (GRAIN_REGROW_MS) - only the pickup that actually found it starts that,
+    // so a double pickup can't grow two
     safeOn(socket, "pickupGrain", grainId => {
+        (0, pickupClaims_1.releasePickup)("grain", grainId);
+        const picked = grains.find(grain => grain.grainId === grainId);
         grains = grains.filter(grain => grain.grainId !== grainId);
         io.emit("grain-removed", grainId);
+        if (picked)
+            setTimeout(() => {
+                const grain = { ...picked, grainId: (0, tools_1.randNumString)() };
+                grains.push(grain);
+                io.emit("grain-added", grain);
+            }, GRAIN_REGROW_MS);
+    });
+    // client's createmushroom.js on pickup - removed for everyone like
+    // "pickupGrain" right above, but the ITEM comes from here: the server is
+    // the one that knows the kinds (MUSHROOM_LIBRARY), and only the player
+    // whose pickup actually found it still here gets one - a second player
+    // clicking the same mushroom in the same moment gets nothing
+    safeOn(socket, "pickupMushroom", mushroomId => {
+        (0, pickupClaims_1.releasePickup)("mushroom", mushroomId);
+        const picked = mushrooms.find(mushroom => mushroom.mushroomId === mushroomId);
+        mushrooms = mushrooms.filter(mushroom => mushroom.mushroomId !== mushroomId);
+        io.emit("mushroom-removed", mushroomId);
+        const item = picked && (0, mushroomLibrary_1.mushroomKind)(picked.kind)?.item();
+        if (item)
+            socket.emit("mushroom-picked", { mushroomId, item });
+        // grows back where it was, the same kind - like a picked grain above
+        // (the hidden places' rare ones take longer: their own regrowMs)
+        if (picked)
+            setTimeout(() => {
+                const mushroom = { ...picked, mushroomId: (0, tools_1.randNumString)() };
+                mushrooms.push(mushroom);
+                io.emit("mushroom-added", mushroom);
+            }, picked.regrowMs ?? MUSHROOM_REGROW_MS);
+    });
+    // a pickaxe swing landing on an ore deposit (the client's
+    // components/oreDeposits.js, once per swing) - one hit point off it, the
+    // new count to everyone (their hp bars), and at 0 it's gone: out of
+    // `ores` and off every client. What the swing digs out is the miner's
+    // own client's roll, as for any minable resource.
+    safeOn(socket, "mineOre", oreId => {
+        const ore = ores.find(o => o.oreId === oreId);
+        if (!ore)
+            return socket.emit("ore-removed", oreId);
+        ore.hp = Math.max(0, ore.hp - 1);
+        if (ore.hp > 0)
+            return io.emit("ore-hp", { oreId, hp: ore.hp, maxHp: ore.maxHp });
+        ores = ores.filter(o => o.oreId !== oreId);
+        io.emit("ore-removed", oreId);
+        // an hour on, a fresh one of the same vein where it stood (makeOre keeps
+        // its own spot and a full 100 hit points)
+        setTimeout(() => {
+            const fresh = (0, ores_1.makeOre)(ore.vein, ore.pos, ore.currentPlaceId, ore.rotation);
+            // still the admin's, if it was - removing it from the page forgets the saved one
+            fresh.adminKey = ore.adminKey;
+            fresh.keep = ore.keep;
+            ores.push(fresh);
+            io.emit("ore-added", fresh);
+        }, ores_1.ORE_RESPAWN_MS);
     });
     safeOn(socket, "enemyWillAttack", data => {
         const { pos } = data;
@@ -1089,15 +1389,41 @@ io.on("connection", (socket) => {
         });
         io.emit("enemy-cast-skill", data);
     });
+    // an enemy's ranged attack (its rangeAtkDetails - the electric slimes'
+    // lightning, the fire slimes' fireball, orangelith's sonic boom): its
+    // target's own client decides it (client/src/enemies/rangeAttack.js),
+    // every client plays it. What it does and how hard it hits come from the
+    // enemy's own data here, not the sender's; one at a time per enemy.
     safeOn(socket, "enemyAttackedRange", data => {
-        tcpEnemies.forEach(enem => {
-            if (data._id === enem._id) {
-                // enem._targetId = data.targetId
-                // enem._isMoving = false
-                // enem._attacking = true
-            }
+        const enem = tcpEnemies.find(e => e._id === data._id);
+        if (!enem?.rangeAtkDetails || enem.hp <= 0)
+            return;
+        const now = Date.now();
+        if (enem._rangeAtkCooldownUntil && now < enem._rangeAtkCooldownUntil)
+            return;
+        enem._rangeAtkCooldownUntil = now + RANGE_ATTACK_MIN_GAP_MS;
+        enem._targetId = data.targetId;
+        io.emit("enemy-attacked-range", {
+            ...data,
+            rangeAtkDetails: enem.rangeAtkDetails,
+            dmg: enem.stats?.dmg ?? 1,
+            effects: enem.effects ?? [],
         });
-        io.emit("enemy-attacked-range", data);
+    });
+    // a ranged attack landed on its victim (their own client decided) - the
+    // others see it on them too: lit up to the bones by lightning
+    // (client/src/effects/electrocute.js), thrown back burnt by a fireball
+    // (effects/scorch.js) - from: where the blast came from
+    safeOn(socket, "rangeAttackLanded", data => {
+        socket.broadcast.emit("range-attack-landed", {
+            owner: data.owner,
+            currentPlaceId: data.currentPlaceId,
+            pType: data.pType,
+            color: data.color,
+            soundWhenHit: data.soundWhenHit,
+            victimAnimation: data.victimAnimation,
+            from: data.from,
+        });
     });
     safeOn(socket, "registerPlayerAsEnemy", data => registerTargetIfNone(data._id, data.targetId, data.dirTarg));
     safeOn(socket, "enemyWillChase", data => {
@@ -1126,6 +1452,8 @@ io.on("connection", (socket) => {
         if (theUzer) {
             players = players.filter(user => user.owner !== ownerId);
             releaseEnemiesTargeting(ownerId);
+            // the undead that killed them stand over them, then fall apart
+            undead.onPlayerGone(ownerId, "died");
             log("total of players after death " + players.length);
             io.emit('player-death', { ownerId: theUzer.owner, currentPlaceId });
         }
@@ -1142,6 +1470,8 @@ io.on("connection", (socket) => {
     safeOn(socket, "disconnect", () => {
         const thePlayer = players.find(player => player.socketId === socket.id);
         if (thePlayer) {
+            // whatever they were in the middle of picking up is free again
+            (0, pickupClaims_1.releaseClaimsOf)(thePlayer.owner);
             removeCharacter(thePlayer.owner, thePlayer.name, thePlayer.currentPlace.placeId);
         }
     });
@@ -1166,6 +1496,15 @@ io.on("connection", (socket) => {
             return;
         enem._dodgeCooldownUntil = now + DODGE_COOLDOWN_MS;
         io.emit("enemy-dodge", data);
+    });
+    // a slime ducking a plain swing (det.dockChance, createEnemy.js's
+    // atkCollider handler) - the swinger rolled it and already plays it, so
+    // only everyone else hears about it
+    safeOn(socket, "enemyWillDock", data => {
+        const enem = tcpEnemies.find(e => e._id === data._id);
+        if (!enem?.dockChance || enem._disabled)
+            return;
+        socket.broadcast.emit("enemy-dock", { _id: enem._id, currentPlaceId: enem.currentPlaceId });
     });
     // lesserdemon's own "teleport in near you instead of chasing" (see
     // genenemy.ts's lesserDemonBase, actionType "teleporting", and
@@ -1215,6 +1554,9 @@ const EAT_CHANCE = 0.15;
 const EAT_MIN_MS = 4000;
 const EAT_MAX_MS = 9000;
 const DODGE_COOLDOWN_MS = 3000;
+// one ranged attack in flight per enemy - its target's client paces them
+// (rangeAttack.js's cooldown); this only drops a double
+const RANGE_ATTACK_MIN_GAP_MS = 1500;
 setInterval(() => {
     const now = Date.now();
     tcpEnemies.forEach(enem => {
@@ -1247,11 +1589,16 @@ setInterval(() => {
         // wandering stays anchored to its own territory instead of
         // drifting further and further from where it was placed over
         // successive wander ticks
+        // inside a dungeon the target has to respect its walls - see
+        // enemiesInDungeon.ts (null: nowhere reachable this tick, stay put)
+        const dungeonDest = (0, enemiesInDungeon_1.dungeonWanderTarget)(enem, WANDER_RADIUS);
+        if (dungeonDest === null)
+            return;
         const origin = enem.origPos ?? { x: enem.x, z: enem.z };
         const angle = Math.random() * Math.PI * 2;
         const radius = Math.random() * WANDER_RADIUS;
-        const destX = origin.x + Math.cos(angle) * radius;
-        const destZ = origin.z + Math.sin(angle) * radius;
+        const destX = dungeonDest ? dungeonDest.x : origin.x + Math.cos(angle) * radius;
+        const destZ = dungeonDest ? dungeonDest.z : origin.z + Math.sin(angle) * radius;
         // every OTHER position-changing event in this file (enemyWillAttack
         // etc.) writes its new x/z straight onto the tcpEnemies entry right
         // alongside its own broadcast - this was the one spot that only
@@ -2463,8 +2810,9 @@ function spawnBot(overrides) {
     io.emit("userJoined", {
         currentPlaceId: botPlayer.currentPlace.placeId, newPlayerName: botPlayer.name, isBot: true,
         players, placesMD: places_1.placesMD, tcpEnemies, quests,
-        treasures, bonfires, trunks, grains, struckWeapons,
-        weather: (0, weather_1.getWeatherState)()
+        treasures, bonfires, trunks, structures, grains, mushrooms, ores, struckWeapons,
+        weather: (0, weather_1.getWeatherState)(),
+        dayNight: (0, dayNight_1.getDayNightState)()
     });
 }
 setInterval(() => {
@@ -2481,7 +2829,13 @@ setInterval(() => {
     const rolled = (0, weather_1.rollWeather)();
     log(`[weather] rolled -> ${rolled}`);
     io.emit("weather-changed", (0, weather_1.getWeatherState)());
+    undead.onWeatherChanged(rolled);
 }, weather_1.WEATHER_ROLL_INTERVAL_MS);
+// World clock resync (recources/dayNight.ts). Clients advance the time of day
+// on their own clocks between these - this only pulls any drift back in line.
+setInterval(() => {
+    io.emit("daynight-sync", (0, dayNight_1.getDayNightState)());
+}, dayNight_1.DAY_NIGHT_SYNC_INTERVAL_MS);
 // pushes each live bot's own place's latest obstaclesByPlace snapshot into
 // its Brain - a bit slower than botSensor.js's own 4s report cadence, no
 // need to sync more often than the underlying data actually changes.
@@ -2537,11 +2891,132 @@ const SLIME_SPAWN_NEARBY_RADIUS = 40;
 // the whole 0-3000 territory." Now it looks up whichever band the player's
 // own distFromCenter actually falls into and only ever tops up with THAT
 // type - a player in waterslime's band gets more waterslime, nothing else.
+// Resting players get no new slimes dropped next to them. A real player is
+// resting while seated (chair, log, a tent's bed - "sit-down" sets `seat`,
+// "stand-up" clears it; player.mode can't be trusted for this, every
+// emitLoc/emitmove/emitStop overwrites it with the client's own mode). A bot is
+// resting while napping (currentMood "rest", see its goalInterval). Slimes
+// already in the area are left alone - this only stops new ones spawning.
+// WEREWOLF HUNTS - the four standing wolves (genenemy.ts, placed far out in
+// the openworld's wolf band by enemyDetails.ts) are near impossible to
+// stumble on, so they come to you instead: a real player who goes
+// HUNT_START_DIST or more from the openworld's start is hunted by the
+// nearest standing wolf that isn't busy. Enemies are only moved by the
+// clients (renderer.js), and only ones built near a player, so a far-off wolf
+// can't simply be sent running from its lair - it's brought in to
+// HUNT_APPEAR_DIST from them instead: inside the 300 their client builds
+// openworld enemies within (worldsocket.js), past the ~180 it shows them
+// within (renderer.js), so it comes running in out of the distance rather
+// than popping up. One already that close just turns on them. Its target
+// being set is what plays its roar (worldsocket.js), and the hunted player
+// is told ("being-hunted") - that roar is too far off for them to hear.
+//
+// A hunt ends when the player heads back in past HUNT_GIVE_UP_DIST, leaves
+// the openworld or disconnects, or the wolf loses them (killed, or released
+// by the target sweep below). The wolf gives up, and if nobody's near enough
+// to see it go it's back at its lair at once - the idle wander walks it home
+// otherwise.
+const STANDING_WOLF_NAMES = ["vargoth", "zareth", "morvane", "skallgrim"];
+// infterrain's SPAWN_X/SPAWN_Z - the openworld's starting point
+const OPENWORLD_START = { x: 0, z: 500 };
+const HUNT_START_DIST = 3000;
+const HUNT_GIVE_UP_DIST = 2800;
+const HUNT_APPEAR_DIST = 220;
+// a player this close to a wolf could see it vanish if it were sent home
+const HUNT_SEEN_DIST = 300;
+const HUNT_CHECK_MS = 2000;
+const hunts = new Map(); // wolf name -> owner of the player it's hunting
+const distFromStart = (pos) => Math.hypot(pos.x - OPENWORLD_START.x, pos.z - OPENWORLD_START.z);
+const isStandingWolf = (enem) => enem.currentPlaceId === 888 && STANDING_WOLF_NAMES.includes(enem.name);
+function startHunt(wolf, prey) {
+    hunts.set(wolf.name, prey.owner);
+    const pos = prey.pos;
+    if (Math.hypot(wolf.x - pos.x, wolf.z - pos.z) > HUNT_APPEAR_DIST) {
+        // in from the side its lair is on, turned until it's clear of any castle
+        let angle = Math.atan2(wolf.z - pos.z, wolf.x - pos.x);
+        let x = pos.x + Math.cos(angle) * HUNT_APPEAR_DIST;
+        let z = pos.z + Math.sin(angle) * HUNT_APPEAR_DIST;
+        for (let tries = 0; (0, castles_1.isNearCastle)(x, z, 10) && tries < 12; tries++) {
+            angle += Math.PI / 6;
+            x = pos.x + Math.cos(angle) * HUNT_APPEAR_DIST;
+            z = pos.z + Math.sin(angle) * HUNT_APPEAR_DIST;
+        }
+        wolf.x = x;
+        wolf.z = z;
+        wolf._eatingUntil = 0;
+        io.emit("enemy-teleported", { _id: wolf._id, currentPlaceId: 888, x, z });
+    }
+    wolf._isMoving = true;
+    wolf._attacking = false;
+    // broadcasts every enemy - its roar on clients that have it, and where it
+    // now is (already chasing) for those that build it from here
+    registerTargetIfNone(wolf._id, prey.owner, { x: pos.x, y: 0, z: pos.z });
+    io.emit("enemy-chasing", { currentPlaceId: 888, _id: wolf._id, targetId: prey.owner, actionType: wolf.actionType });
+    io.to(prey.socketId).emit("being-hunted", { name: wolf.dn ?? wolf.name });
+    log(`[hunt] ${wolf.dn} hunts ${prey.name}`);
+}
+function callOffHunt(wolf, owner) {
+    if (wolf._targetId === owner) {
+        wolf._targetId = false;
+        wolf._isMoving = false;
+        wolf._attacking = false;
+    }
+    const seen = players.some(pl => pl.currentPlace?.placeId === 888 && pl.pos && Math.hypot(pl.pos.x - wolf.x, pl.pos.z - wolf.z) < HUNT_SEEN_DIST);
+    if (!wolf._targetId && !seen && wolf.origPos) {
+        wolf.x = wolf.origPos.x;
+        wolf.z = wolf.origPos.z;
+        io.emit("enemy-teleported", { _id: wolf._id, currentPlaceId: 888, x: wolf.x, z: wolf.z });
+    }
+    io.emit("registered-playerAsEnemy", tcpEnemies);
+}
+setInterval(() => {
+    // hunts that are over
+    hunts.forEach((owner, wolfName) => {
+        const wolf = tcpEnemies.find(enem => isStandingWolf(enem) && enem.name === wolfName);
+        const prey = players.find(pl => pl.owner === owner);
+        const stillOn = wolf && wolf._targetId === owner
+            && prey?.pos && prey.currentPlace?.placeId === 888 && distFromStart(prey.pos) >= HUNT_GIVE_UP_DIST;
+        if (stillOn)
+            return;
+        hunts.delete(wolfName);
+        if (wolf)
+            callOffHunt(wolf, owner);
+    });
+    // and new ones
+    players.forEach(pl => {
+        if (pl.currentPlace?.placeId !== 888 || !pl.pos)
+            return;
+        if (bots.some(b => b.player.owner === pl.owner))
+            return;
+        if (distFromStart(pl.pos) < HUNT_START_DIST)
+            return;
+        if ([...hunts.values()].includes(pl.owner))
+            return;
+        const wolves = tcpEnemies.filter(isStandingWolf);
+        // one that already spotted them on its own counts as their hunter
+        const onThem = wolves.find(enem => enem._targetId === pl.owner);
+        if (onThem) {
+            hunts.set(onThem.name, pl.owner);
+            return;
+        }
+        const free = wolves.filter(enem => !enem._targetId && !hunts.has(enem.name));
+        if (!free.length)
+            return;
+        const pos = pl.pos;
+        const nearest = free.reduce((best, enem) => Math.hypot(enem.x - pos.x, enem.z - pos.z) < Math.hypot(best.x - pos.x, best.z - pos.z) ? enem : best);
+        startHunt(nearest, pl);
+    });
+}, HUNT_CHECK_MS);
+function isPlayerResting(player) {
+    return !!player.seat || player.currentMood === "rest";
+}
 setInterval(() => {
     players.forEach(player => {
         if (player.currentPlace?.placeId !== 888)
             return;
         if (!player.pos)
+            return;
+        if (isPlayerResting(player))
             return;
         const { center, minDist, maxDist } = enemyDetails_1.OPENWORLD_SLIME_TERRITORY;
         const distFromCenter = Math.hypot(player.pos.x - center.x, player.pos.z - center.z);
@@ -2559,6 +3034,10 @@ setInterval(() => {
         const band = enemyDetails_1.OPENWORLD_ENEMY_BANDS.find(b => distFromCenter >= b.minDist && distFromCenter <= b.maxDist);
         if (!band)
             return; // between two bands (shouldn't happen, they're contiguous) or past the outermost one
+        // a player at a witch tower: no dark slime is topped up beside them
+        // (they'd spawn 15-25 away - inside the zone genenemy.ts keeps them out of)
+        if (band.name === "darkslime" && (0, witchTowers_1.isNearWitchTower)(player.pos.x, player.pos.z))
+            return;
         const [newSlime] = band.generator(1, 888, 100, "ring", player.pos.x, player.pos.z, SLIME_SPAWN_DIST_MIN, SLIME_SPAWN_DIST_MAX);
         newSlime.territory = enemyDetails_1.OPENWORLD_SLIME_TERRITORY;
         newSlime._id = (0, tools_1.randNumString)();
@@ -2620,9 +3099,33 @@ function removeCharacter(ownerId, playerName, placeId) {
         }
     });
     releaseServantsOf(ownerId);
+    undead.onPlayerGone(ownerId, "left");
     log("total of players after disconnect " + players.length);
     io.emit('removeChar', { ownerId, playerName, placeId });
 }
+// the master control (admin/): a page at /admin and its socket namespace. The
+// world is handed over as getters and setters since this file reassigns its own
+// state (tcpEnemies = tcpEnemies.filter(...)) and a copy would go stale.
+(0, admin_1.setupAdmin)({
+    app,
+    io,
+    world: {
+        get players() { return players; }, set players(value) { players = value; },
+        get enemies() { return tcpEnemies; }, set enemies(value) { tcpEnemies = value; },
+        get treasures() { return treasures; }, set treasures(value) { treasures = value; },
+        get grains() { return grains; }, set grains(value) { grains = value; },
+        get mushrooms() { return mushrooms; }, set mushrooms(value) { mushrooms = value; },
+        get ores() { return ores; }, set ores(value) { ores = value; },
+        get bonfires() { return bonfires; },
+        get trunks() { return trunks; },
+        get structures() { return structures; },
+        get struckWeapons() { return struckWeapons; },
+        get bots() { return bots; },
+        get spawnBotsEnabled() { return spawnBotsEnabled; }, set spawnBotsEnabled(value) { spawnBotsEnabled = value; },
+        spawnBot: overrides => spawnBot(overrides),
+        get hunts() { return hunts; },
+    },
+});
 server.listen(PORT, () => log("TCP server is on port", PORT));
 // If you are planning to create a room
 // socket.on('join-room', (roomId) => {

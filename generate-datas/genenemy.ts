@@ -1,7 +1,9 @@
 import { randNumString } from "../tools/tools"
 import { simpleCoreLoot, mediumCoreLoot, waterslimeCoreLoot, fireslimeCoreLoot, electricslimeCoreLoot, darkslimeCoreLoot, celestineOreLoot, orangelithCoreLoot } from "../recources/coreDetails"
 import { isNearCastle } from "../recources/castles"
-import { beastMeatLoot } from "../recources/meatLoots"
+import { isNearWitchTower } from "../recources/witchTowers"
+import { beastMeatLoot, wolfRibLoot } from "../recources/meatLoots"
+import { SLIME_BASH_ATTACK } from "../recources/enemyAttacks"
 
 // clear ground kept around each openworld castle when placing enemies - see
 // generateEnemies
@@ -51,6 +53,11 @@ const slimeBase = {
     // gates on this flag, same as the other three).
     skills: ['tidalspike'],
     canDodge: true,
+    // ducks a plain close-range swing now and then (its "dock" clip - the
+    // swing misses outright, createEnemy.js's atkCollider handler): the
+    // smallest share of the slime family's. The variants spreading this set
+    // their own - electric 0.5, dark 0.8 - or none (fire, below)
+    dockChance: 0.2,
     aptitude: ['water'],
     blessings: [],
     status: [],
@@ -95,6 +102,17 @@ const fireSlimeBase = {
     aptitude: ['fire'],
     skills: ['flamebrand'],
     canDodge: true,
+    // no ducking - not the water slime's 0.2 (slimeBase) either
+    dockChance: 0,
+    // a ranged attack beside its skill (client/src/enemies/rangeAttack.js):
+    // past melee reach it puffs up and lobs a fireball at where its target
+    // is headed - a ring on the ground shows where it'll come down. Caught in
+    // the blast, they're thrown back burnt to a crisp (effects/scorch.js).
+    // color: red, blue, green, purple, white or any "#rrggbb" (effects/fireball.js)
+    rangeAtkDetails: { range: 15, modelName: false, projectileDet: { pType: "fireball", color: "red" }, soundWhenHit: "firehit", victimAnimation: "hit_struct1" },
+    // now and then a melee attack is a body slam instead: it knocks the
+    // player back and leaves them stunned (recources/enemyAttacks.ts)
+    additionalAttacks: [SLIME_BASH_ATTACK],
     loots: [fireslimeCoreLoot],
     expToGain: 200,
     hp: 2500,
@@ -111,8 +129,17 @@ const electricSlimeBase = {
     elementType: "lightning",
     titles: ['electric slime'],
     aptitude: ['lightning'],
-    skills: ['lightningbolt'],
+    skills: ['lightningbolt', 'voltstep'],
     canDodge: true,
+    // ducks a plain close-range swing (its "dock" clip) - this share of
+    // them miss outright (createEnemy.js's atkCollider handler)
+    dockChance: 0.5,
+    // a ranged attack beside its skill (client/src/enemies/rangeAttack.js):
+    // past melee reach it charges, then strikes a lightning bolt at its
+    // target - the victim lit up to the bones (effects/electrocute.js)
+    rangeAtkDetails: { range: 15, modelName: false, projectileDet: { pType: "lightning", color: "yellow" }, soundWhenHit: "electrichit", victimAnimation: "electrified" },
+    // the body slam, same as fireSlimeBase's
+    additionalAttacks: [SLIME_BASH_ATTACK],
     loots: [electricslimeCoreLoot],
     expToGain: 500,
     hp: 3000,
@@ -128,6 +155,14 @@ const electricSlimeBase = {
 // already enemy-usable (lesserDemonBase above casts it too), so reused
 // as-is instead of inventing a new skill. elementType: "dark" resolves to
 // the purple/black palette added in client/src/enemies/skins.js.
+//
+// Its fury cutters (rangeAtkDetails below) open you up: every cutter that
+// lands leaves you bleeding - the standing wolves' bleed (client's
+// characterstate.js tickBleed: 2% of max hp a second, lethal, until a cure
+// lifts it), only certain rather than their claws' 25%. Its own copy rather
+// than standingWolfBase's bleedEffect - that one's declared further down,
+// after this object is already built.
+const cutterBleedEffect = { effectType: 'bleed', chance: 100, permanent: true, dn: 'Bleeding', spcost: 0, hpcost: 0, mpcost: 0, hungercost: 0, energycost: 0 }
 const darkSlimeBase = {
     ...slimeBase,
     name: "darkslime",
@@ -153,6 +188,19 @@ const darkSlimeBase = {
     aptitude: ['dark'],
     skills: ['shadowbolt'],
     canDodge: true,
+    // ducks a plain close-range swing (its "dock" clip) - this share of
+    // them miss outright (createEnemy.js's atkCollider handler)
+    dockChance: 0.8,
+    // a ranged attack beside its skill (client/src/enemies/rangeAttack.js):
+    // past melee reach it draws itself in, a glint flashes off it, lanes light
+    // up fanned out at its target, and it throws 2-3 crescents of its own dark
+    // liquid down them (models/projectiles/crescent.glb - effects/darkSlash.js),
+    // one after another. Every one that cuts you hits for its dmg and leaves
+    // you bleeding (effects, on top of its own melee effects - the client's
+    // landOnMe). Cut, you're shoved back and stagger (effects/slashed.js).
+    // color: purple or any "#rrggbb". Its sounds are made in code, darkCutS
+    // among them (effects/darkSlashSounds.js).
+    rangeAtkDetails: { range: 15, modelName: false, projectileDet: { pType: "darkslash", color: "purple", slashes: [2, 3] }, soundWhenHit: "darkCutS", victimAnimation: "hit_struct1", effects: [cutterBleedEffect] },
     loots: [darkslimeCoreLoot],
     expToGain: 2000,
 }
@@ -162,13 +210,10 @@ const monolithBase = {
     // advancing once dist < maxDistance, and createEnemy.js's attack()
     // uses the same field for its own range check), so it stopped and
     // "attacked" from 4.5 units out with nothing ever visually connecting.
-    // rangeAtkDetails below (range: 15) suggests 4.5 was actually tuned for
-    // a ranged sting attack, but the code that would use rangeAtkDetails is
-    // commented out in createEnemy.js and actionType here is "chasing" not
-    // "dynamic"/"throwing" - it never fires, so this was silently running
-    // melee-only this whole time. 0.7 is a real melee reach, roughly
-    // matching slimeBase's own maxDistance-to-bodyWidenes ratio (0.5/0.9)
-    // with a little extra for this enemy's taller frame (bodyHeight 2).
+    // 0.7 is a real melee reach, roughly matching slimeBase's own
+    // maxDistance-to-bodyWidenes ratio (0.5/0.9) with a little extra for
+    // this enemy's taller frame (bodyHeight 2). Its reach past that is
+    // rangeAtkDetails below - the sonic boom.
     maxDistance: 0.7,
     elementType: "earth",
     name: "orangelith",
@@ -197,7 +242,14 @@ const monolithBase = {
     bodyHeight: 2,
     bodyWidenes: 1.1,
     actionType: "chasing",
-    rangeAtkDetails: { range: 15, modelName: "sting", soundWhenHit: "struckS" },
+    // a ranged attack beside its skill (client/src/enemies/rangeAttack.js):
+    // past melee reach it hums itself up, the lane it'll fire down lights up
+    // on the ground, and a sonic boom tears down it (effects/sonicBoom.js).
+    // Caught in it, they're thrown down the lane, ears ringing
+    // (effects/concussed.js). Its sounds are made in code, sonichit among
+    // them (effects/sonicSounds.js).
+    // color: orange, blue, purple, green, white or any "#rrggbb"
+    rangeAtkDetails: { range: 15, modelName: false, projectileDet: { pType: "sonic", color: "orange" }, soundWhenHit: "sonichit", victimAnimation: "hit_struct1" },
     deathSound: "beeS",
     encounterSound: "beeS",
     effects: [
@@ -654,7 +706,7 @@ const strayWolfBase = {
     magicBlocking: false,
     IsInVulnerable: false,
     // required - createEnemy.js's death handler reads loots.length unguarded
-    loots: [simpleCoreLoot],
+    loots: [simpleCoreLoot, wolfRibLoot],
     respawnDetails: {
         willRespawn: true,
         respawnTime: 60 * 1000,
@@ -873,7 +925,9 @@ function scatterPosition(areaType: string, half: number, minRadius: number, maxR
     return { x, z }
 }
 
-function generateEnemies(base: object, total: number, placeId: number, areaSize: number, areaType: string, centerX: number, centerZ: number, minRadius: number, maxRadius: number) {
+// keepOut (optional): a spot it returns true for is rolled again, like the
+// castles' - how the dark slimes stay away from the witch towers
+function generateEnemies(base: object, total: number, placeId: number, areaSize: number, areaType: string, centerX: number, centerZ: number, minRadius: number, maxRadius: number, keepOut?: (x: number, z: number) => boolean) {
     const half = areaSize / 2
     const enemies = []
 
@@ -891,7 +945,7 @@ function generateEnemies(base: object, total: number, placeId: number, areaSize:
         // all an enemy ever strays from its spawn on its own, so wandering
         // never walks one into a castle wall either. "fixed" spawns are
         // placed on purpose and left alone.
-        for (let tries = 0; placeId === 888 && areaType !== "fixed" && isNearCastle(x, z, CASTLE_SPAWN_MARGIN) && tries < 20; tries++) {
+        for (let tries = 0; placeId === 888 && areaType !== "fixed" && (isNearCastle(x, z, CASTLE_SPAWN_MARGIN) || keepOut?.(x, z)) && tries < 20; tries++) {
             const again = scatterPosition(areaType, half, minRadius, maxRadius)
             x = again.x + centerX
             z = again.z + centerZ
@@ -926,7 +980,8 @@ export function generateElectricSlimes(total = 10, placeId = 1, areaSize = 300, 
 }
 
 export function generateDarkSlimes(total = 10, placeId = 1, areaSize = 300, areaType = "village", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
-    return generateEnemies(darkSlimeBase, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius)
+    // the strongest of the slimes - kept off the witch towers' doorsteps
+    return generateEnemies(darkSlimeBase, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius, (x, z) => isNearWitchTower(x, z))
 }
 
 export function generateMonoliths(total = 5, placeId = 1, areaSize = 300, areaType = "village", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {

@@ -11,10 +11,21 @@ exports.generateLuminaDeer = generateLuminaDeer;
 exports.generateNightmareDeer = generateNightmareDeer;
 exports.generateScorchDeer = generateScorchDeer;
 exports.generateWisfDeer = generateWisfDeer;
+exports.generateWildDeer = generateWildDeer;
 exports.generateLesserDemons = generateLesserDemons;
 exports.generateGhosts = generateGhosts;
+exports.generateStrayWolves = generateStrayWolves;
+exports.generateStandingWolf = generateStandingWolf;
+exports.generateIceScorpions = generateIceScorpions;
 const tools_1 = require("../tools/tools");
 const coreDetails_1 = require("../recources/coreDetails");
+const castles_1 = require("../recources/castles");
+const witchTowers_1 = require("../recources/witchTowers");
+const meatLoots_1 = require("../recources/meatLoots");
+const enemyAttacks_1 = require("../recources/enemyAttacks");
+// clear ground kept around each openworld castle when placing enemies - see
+// generateEnemies
+const CASTLE_SPAWN_MARGIN = 10;
 const slimeBase = {
     maxDistance: 0.5,
     name: "waterslime",
@@ -59,6 +70,11 @@ const slimeBase = {
     // gates on this flag, same as the other three).
     skills: ['tidalspike'],
     canDodge: true,
+    // ducks a plain close-range swing now and then (its "dock" clip - the
+    // swing misses outright, createEnemy.js's atkCollider handler): the
+    // smallest share of the slime family's. The variants spreading this set
+    // their own - electric 0.5, dark 0.8 - or none (fire, below)
+    dockChance: 0.2,
     aptitude: ['water'],
     blessings: [],
     status: [],
@@ -103,6 +119,17 @@ const fireSlimeBase = {
     aptitude: ['fire'],
     skills: ['flamebrand'],
     canDodge: true,
+    // no ducking - not the water slime's 0.2 (slimeBase) either
+    dockChance: 0,
+    // a ranged attack beside its skill (client/src/enemies/rangeAttack.js):
+    // past melee reach it puffs up and lobs a fireball at where its target
+    // is headed - a ring on the ground shows where it'll come down. Caught in
+    // the blast, they're thrown back burnt to a crisp (effects/scorch.js).
+    // color: red, blue, green, purple, white or any "#rrggbb" (effects/fireball.js)
+    rangeAtkDetails: { range: 15, modelName: false, projectileDet: { pType: "fireball", color: "red" }, soundWhenHit: "firehit", victimAnimation: "hit_struct1" },
+    // now and then a melee attack is a body slam instead: it knocks the
+    // player back and leaves them stunned (recources/enemyAttacks.ts)
+    additionalAttacks: [enemyAttacks_1.SLIME_BASH_ATTACK],
     loots: [coreDetails_1.fireslimeCoreLoot],
     expToGain: 200,
     hp: 2500,
@@ -118,8 +145,17 @@ const electricSlimeBase = {
     elementType: "lightning",
     titles: ['electric slime'],
     aptitude: ['lightning'],
-    skills: ['lightningbolt'],
+    skills: ['lightningbolt', 'voltstep'],
     canDodge: true,
+    // ducks a plain close-range swing (its "dock" clip) - this share of
+    // them miss outright (createEnemy.js's atkCollider handler)
+    dockChance: 0.5,
+    // a ranged attack beside its skill (client/src/enemies/rangeAttack.js):
+    // past melee reach it charges, then strikes a lightning bolt at its
+    // target - the victim lit up to the bones (effects/electrocute.js)
+    rangeAtkDetails: { range: 15, modelName: false, projectileDet: { pType: "lightning", color: "yellow" }, soundWhenHit: "electrichit", victimAnimation: "electrified" },
+    // the body slam, same as fireSlimeBase's
+    additionalAttacks: [enemyAttacks_1.SLIME_BASH_ATTACK],
     loots: [coreDetails_1.electricslimeCoreLoot],
     expToGain: 500,
     hp: 3000,
@@ -159,6 +195,9 @@ const darkSlimeBase = {
     aptitude: ['dark'],
     skills: ['shadowbolt'],
     canDodge: true,
+    // ducks a plain close-range swing (its "dock" clip) - this share of
+    // them miss outright (createEnemy.js's atkCollider handler)
+    dockChance: 0.8,
     loots: [coreDetails_1.darkslimeCoreLoot],
     expToGain: 2000,
 };
@@ -167,13 +206,10 @@ const monolithBase = {
     // advancing once dist < maxDistance, and createEnemy.js's attack()
     // uses the same field for its own range check), so it stopped and
     // "attacked" from 4.5 units out with nothing ever visually connecting.
-    // rangeAtkDetails below (range: 15) suggests 4.5 was actually tuned for
-    // a ranged sting attack, but the code that would use rangeAtkDetails is
-    // commented out in createEnemy.js and actionType here is "chasing" not
-    // "dynamic"/"throwing" - it never fires, so this was silently running
-    // melee-only this whole time. 0.7 is a real melee reach, roughly
-    // matching slimeBase's own maxDistance-to-bodyWidenes ratio (0.5/0.9)
-    // with a little extra for this enemy's taller frame (bodyHeight 2).
+    // 0.7 is a real melee reach, roughly matching slimeBase's own
+    // maxDistance-to-bodyWidenes ratio (0.5/0.9) with a little extra for
+    // this enemy's taller frame (bodyHeight 2). Its reach past that is
+    // rangeAtkDetails below - the sonic boom.
     maxDistance: 0.7,
     elementType: "earth",
     name: "orangelith",
@@ -202,7 +238,14 @@ const monolithBase = {
     bodyHeight: 2,
     bodyWidenes: 1.1,
     actionType: "chasing",
-    rangeAtkDetails: { range: 15, modelName: "sting", soundWhenHit: "struckS" },
+    // a ranged attack beside its skill (client/src/enemies/rangeAttack.js):
+    // past melee reach it hums itself up, the lane it'll fire down lights up
+    // on the ground, and a sonic boom tears down it (effects/sonicBoom.js).
+    // Caught in it, they're thrown down the lane, ears ringing
+    // (effects/concussed.js). Its sounds are made in code, sonichit among
+    // them (effects/sonicSounds.js).
+    // color: orange, blue, purple, green, white or any "#rrggbb"
+    rangeAtkDetails: { range: 15, modelName: false, projectileDet: { pType: "sonic", color: "orange" }, soundWhenHit: "sonichit", victimAnimation: "hit_struct1" },
     deathSound: "beeS",
     encounterSound: "beeS",
     effects: [
@@ -233,7 +276,8 @@ const monolithBase = {
     weaponBlocking: false,
     magicBlocking: false,
     IsInVulnerable: false,
-    loots: [coreDetails_1.simpleCoreLoot],
+    // its own core now, not the generic small one (coreDetails.ts)
+    loots: [coreDetails_1.orangelithCoreLoot],
     respawnDetails: {
         willRespawn: true,
         respawnTime: 30 * 1000,
@@ -304,9 +348,9 @@ const forestDeer = {
     IsInVulnerable: false,
     // required - createEnemy.js's own death handler does `loots.length` with
     // no guard, so an enemy base missing this crashes the client on death.
-    // simpleCoreLoot, not mediumCoreLoot, to match its lvl/hp tier (monolith
-    // lvl10/hp5700 and lesserdemon lvl30/hp12000 both use simpleCoreLoot too -
-    // mediumCoreLoot is reserved for woodbane, a much bigger hp26700 enemy)
+    // simpleCoreLoot, not mediumCoreLoot, to match its lvl/hp tier (lesserdemon
+    // lvl30/hp12000 uses simpleCoreLoot too - mediumCoreLoot is reserved for
+    // much bigger enemies)
     loots: [coreDetails_1.simpleCoreLoot],
     respawnDetails: {
         willRespawn: true,
@@ -437,6 +481,11 @@ const ghostBase = {
     // (createEnemy.js's enemyIsHit). Skills and burn ticks still land
     // normally - they never set isPhysicalDmg.
     physicalImmune: true,
+    // the Purification skill destroys it outright - applyDamageToEnemy
+    // (tcp/index.ts) turns a dmgDetails.isPurify hit into its full remaining
+    // hp. Only enemies with this flag; anything else a purify hit lands on
+    // takes nothing.
+    purifiable: true,
     stats: {
         dmg: 10,
         // was 16 - fireEnemySkillProjectile scales an enemy's spell by
@@ -495,6 +544,316 @@ const ghostBase = {
         respawnTime: 20 * 1000,
     },
 };
+// giant scorpion - modelStyle "giantscorpion" (models/monsters/giantscorpion.glb,
+// idle1/running1/attack1/attack2/hit1/death - the same clip names ghost.glb
+// uses, so createEnemy.js plays it with no special cases). ONE rig for every
+// kind of scorpion: a kind is a copy of this base with its own `name`, which
+// picks its skin (images/textures/enemy/giantscorpion/<name>.jpg -
+// createMonsterMaterial's convention), plus stats/element/loot.
+//
+// modelScale/modelYaw (createEnemy.js applies both): as exported the model is
+// ~3x too big (a 4.6-wide body, tail curling 12+ up) and faces -z - 0.38
+// makes it ~2.5 wide and ~5 tall tail-up, a real giant next to a 1.5-tall
+// player that still fits a dungeon's 4-unit cells; Math.PI turns it to face
+// the way it walks.
+const giantScorpionBase = {
+    // reach - its tail strikes well ahead of it
+    maxDistance: 1.4,
+    name: "giantscorpion",
+    dn: "Giant Scorpion",
+    modelStyle: "giantscorpion",
+    modelScale: 0.38,
+    modelYaw: Math.PI,
+    elementType: "earth",
+    stats: {
+        dmg: 22,
+        magDmg: 1,
+        spd: 3.0,
+        atkSpd: 2.0,
+        accuracy: 1.2,
+        critical: 1.5,
+    },
+    lvl: 6,
+    hp: 3200,
+    maxHp: 3200,
+    expToGain: 420,
+    // the hp bar and name sit over its back, below the raised tail
+    bodyHeight: 2.0,
+    bodyWidenes: 1.6,
+    // the sting - same "poisoned" shape the venomous enemies use, lifted
+    // by the same cures (lunaraqum's cure: ["poisoned"])
+    effects: [
+        { effectType: 'poisoned', chance: 15, permanent: true, dn: 'Scorpion Venom', spcost: 10, hpcost: 15, mpcost: 0, hungercost: 2, energycost: 0 },
+    ],
+    effectsWhenHit: [],
+    titles: ['scorpion'],
+    aptitude: ['earth'],
+    skills: [],
+    canDodge: false,
+    blessings: [],
+    status: [],
+    regens: { sp: 1, hp: 1, mana: 1 },
+    monsSoul: 3,
+    race: "monster",
+    characterType: "enemy",
+    actionType: "chasing",
+    _isMoving: false,
+    _targetId: false,
+    _dirTarg: { x: 0, y: 0, z: 0 },
+    _attacking: false,
+    _canAttack: true,
+    _disabled: false, // skill.enemyBind - see index.ts's enemyBind handler
+    _cursed: false, // dark magic's curse - see index.ts's enemyCurse handler
+    weaponBlocking: false,
+    magicBlocking: false,
+    IsInVulnerable: false,
+    loots: [coreDetails_1.simpleCoreLoot],
+    respawnDetails: {
+        willRespawn: true,
+        respawnTime: 30 * 1000,
+    },
+};
+// the first kind - icy, crystal-skinned (images/textures/enemy/giantscorpion/
+// icescorpion.jpg). skin: "crystal" gives it the client's crystal material
+// (enemies/skins.js's createCrystalMat - glints and a cold rim glow) instead
+// of a plain textured one. Ice melts: weak to fire.
+const iceScorpionBase = {
+    ...giantScorpionBase,
+    name: "icescorpion",
+    dn: "Frost Scorpion",
+    elementType: "water",
+    weakness: "fire",
+    skin: "crystal",
+    titles: ['frost scorpion'],
+    aptitude: ['water'],
+    loots: [coreDetails_1.celestineOreLoot],
+};
+// stray wolf - modelStyle "wolf" (models/monsters/wolf.glb, idle1/running1/
+// attack1/attack2/hit1/hit2/death - the same clip names ghost.glb and
+// giantscorpion.glb use, so createEnemy.js plays it with no special cases),
+// skinned by images/textures/enemy/wolf/straywolf.jpg (createMonsterMaterial's
+// convention). A fast hunter: spd 9 out-runs everything else here (deer 8,
+// monolith 7) but stays under the player's sprint (inputMovement.js's
+// sprintSpeed 10) - you can still get away from one, just barely. No walkSpd:
+// the model has no walking clip, so it lopes everywhere on running1. They
+// roam the openworld's outermost band, past the forest deer (enemyDetails.ts's
+// OPENWORLD_ENEMY_BANDS), so they sit just above the deer's tier: a touch
+// more level, a little less hp, quicker, lighter bites.
+const strayWolfBase = {
+    maxDistance: 0.8,
+    name: "straywolf",
+    dn: "Stray Wolf",
+    // a hunter, not a grazer - sees you coming from this far off and runs
+    // you down (createEnemy.js's det.detectRange poll, same as the standing
+    // wolves; no roar clip, so it just comes)
+    detectRange: 20,
+    // and hunts as a pack: once one of them is after you, every other stray
+    // wolf within this far of it joins in (createEnemy.js, same poll)
+    packRange: 25,
+    modelStyle: "wolf",
+    elementType: "none",
+    weakness: "fire",
+    stats: {
+        dmg: 36,
+        magDmg: 1,
+        spd: 9,
+        atkSpd: 4,
+        accuracy: 1.4,
+        critical: 1.6,
+    },
+    lvl: 22,
+    hp: 5200,
+    maxHp: 5200,
+    expToGain: 1100,
+    // the hp bar clears its ears (head top ~1.55 when it stands up)
+    bodyHeight: 1.6,
+    bodyWidenes: 1.0,
+    effects: [],
+    effectsWhenHit: [],
+    titles: ['wolf'],
+    aptitude: [],
+    skills: [],
+    canDodge: true,
+    blessings: [],
+    status: [],
+    regens: { sp: 1, hp: 1, mana: 1 },
+    monsSoul: 2,
+    race: "monster",
+    characterType: "enemy",
+    actionType: "chasing",
+    _isMoving: false,
+    _targetId: false,
+    _dirTarg: { x: 0, y: 0, z: 0 },
+    _attacking: false,
+    _canAttack: true,
+    _disabled: false, // skill.enemyBind - see index.ts's enemyBind handler
+    _cursed: false, // dark magic's curse - see index.ts's enemyCurse handler
+    weaponBlocking: false,
+    magicBlocking: false,
+    IsInVulnerable: false,
+    // required - createEnemy.js's death handler reads loots.length unguarded
+    loots: [coreDetails_1.simpleCoreLoot, meatLoots_1.wolfRibLoot],
+    respawnDetails: {
+        willRespawn: true,
+        respawnTime: 60 * 1000,
+    },
+};
+// standing wolves - modelStyle "standingwolf" (models/monsters/standingwolf.glb),
+// four named werewolves on ONE rig: each one's `name` picks its skin
+// (images/textures/enemy/standingwolf/<name>.jpg, createMonsterMaterial's
+// convention), and its element and loot follow that skin. The village's
+// elites, in rising order: Vargoth (plain brown - the brawler, pounces),
+// Zareth (crimson, ember-veined - fire), Morvane (black-marked - dark) and
+// Skallgrim (frost-white - the strongest).
+//
+// NOTE the glb only has an idle1 clip so far - no running1/attack1/hit/death.
+// createEnemy.js/renderer.js skip missing clips quietly, so until those are
+// added a standing wolf glides after you in its idle pose and vanishes on
+// death without a death animation. Add the clips under those names and they
+// play with no code change.
+//
+// Their claws make you bleed - client's characterstate.js tickBleed: 2% of
+// max hp every second, lethal, until a cure lifts it (Purification, the
+// healing circle, Vesper). Every wolf below keeps it, including the ones with
+// their own effects list. Costs all 0 - the drain is the tick, not the hit.
+const bleedEffect = { effectType: 'bleed', chance: 25, permanent: true, dn: 'Bleeding', spcost: 0, hpcost: 0, mpcost: 0, hungercost: 0, energycost: 0 };
+const standingWolfBase = {
+    hitmarks: [
+        {
+            attackType: "normal",
+            animationName: "attack2",
+            hitmarkTexture: "claw.webp"
+        }
+    ],
+    maxDistance: 1.3,
+    // sight - notices a player this far off, any direction (createEnemy.js's
+    // det.detectRange poll), roars at them (its roar1 clip) and comes for
+    // them. Most other enemies only notice you once you bump into it or hit it
+    // (the stray wolves have sight too).
+    detectRange: 24,
+    modelStyle: "standingwolf",
+    elementType: "none",
+    weakness: "light",
+    stats: {
+        dmg: 45,
+        magDmg: 2,
+        // faster than the stray wolf (9) - the bigger hunter - but still
+        // under the player's sprint (inputMovement.js's sprintSpeed 10), so
+        // a sprinting player can still pull away, slowly
+        spd: 9.6,
+        atkSpd: 3,
+        accuracy: 1.4,
+        critical: 1.6,
+    },
+    lvl: 18,
+    hp: 7000,
+    maxHp: 7000,
+    expToGain: 1400,
+    // ~2.9 tall in its crouch, about twice the player - 3.0 keeps the hp bar
+    // just over its ears
+    bodyHeight: 3.0,
+    bodyWidenes: 1.6,
+    effects: [bleedEffect],
+    effectsWhenHit: [],
+    titles: ['werewolf'],
+    // every attack is these clips back to back, its damage split across the
+    // swings (client's worldsocket.js "enemy-attacked"). 1.33s each - the
+    // pair just fits atkSpd 3's 2.7s between attacks (createEnemy.js); a
+    // quicker atkSpd (skallgrim's 2.6) plays them a little faster to fit
+    attackCombo: ["attack1", "attack2"],
+    aptitude: [],
+    // claws and the pounce only, no spells - blinkstrike: a telegraphed
+    // leap to you and one boosted swipe (skillEffects.js's
+    // triggerEnemyBlinkstrike). Every standing wolf but Zareth has it.
+    skills: ['blinkstrike'],
+    canDodge: true,
+    blessings: [],
+    status: [],
+    regens: { sp: 1, hp: 1, mana: 1 },
+    monsSoul: 3,
+    race: "monster",
+    characterType: "enemy",
+    actionType: "chasing",
+    _isMoving: false,
+    _targetId: false,
+    _dirTarg: { x: 0, y: 0, z: 0 },
+    _attacking: false,
+    _canAttack: true,
+    _disabled: false, // skill.enemyBind - see index.ts's enemyBind handler
+    _cursed: false, // dark magic's curse - see index.ts's enemyCurse handler
+    weaponBlocking: false,
+    magicBlocking: false,
+    IsInVulnerable: false,
+    loots: [coreDetails_1.mediumCoreLoot, meatLoots_1.beastMeatLoot],
+    respawnDetails: {
+        willRespawn: true,
+        respawnTime: 60 * 1000,
+    },
+};
+// the brawler
+const vargoth = {
+    ...standingWolfBase,
+    name: "vargoth",
+    dn: "Vargoth",
+    weakness: "lightning",
+};
+// ember-veined - claws that burn, drops a fire core
+const zareth = {
+    ...standingWolfBase,
+    name: "zareth",
+    dn: "Zareth",
+    elementType: "fire",
+    weakness: "water",
+    aptitude: ['fire'],
+    // no pounce - the one wolf that never had it; his claws burn instead
+    skills: [],
+    stats: { ...standingWolfBase.stats, dmg: 50, magDmg: 3 },
+    lvl: 22,
+    hp: 8500,
+    maxHp: 8500,
+    expToGain: 1800,
+    effects: [
+        // characterstate.js's startBurnDamage - dmgPm off your hp each tick for duration ms
+        { effectType: 'burn', chance: 15, permanent: false, dn: 'Scorched', dmgPm: 20, duration: 4000, soundPlayPerDmg: 'dmgpm' },
+        bleedEffect,
+    ],
+    loots: [coreDetails_1.mediumCoreLoot, coreDetails_1.fireslimeCoreLoot, meatLoots_1.beastMeatLoot],
+};
+// black-marked - claws that drain you
+const morvane = {
+    ...standingWolfBase,
+    name: "morvane",
+    dn: "Morvane",
+    elementType: "dark",
+    weakness: "light",
+    aptitude: ['dark'],
+    stats: { ...standingWolfBase.stats, dmg: 48, magDmg: 3, spd: 9.8 },
+    lvl: 25,
+    hp: 9500,
+    maxHp: 9500,
+    expToGain: 2100,
+    effects: [
+        { effectType: 'spdrain', chance: 15, permanent: false, dn: 'SP Drained', spcost: 30, hpcost: 0, mpcost: 0, hungercost: 4, energycost: 0 },
+        bleedEffect,
+    ],
+    loots: [coreDetails_1.mediumCoreLoot, coreDetails_1.darkslimeCoreLoot, meatLoots_1.beastMeatLoot],
+};
+// frost-white - the pack's strongest: the heaviest blows; drops an icy
+// celestine shard like the frost scorpion
+const skallgrim = {
+    ...standingWolfBase,
+    name: "skallgrim",
+    dn: "Skallgrim",
+    elementType: "water",
+    weakness: "fire",
+    aptitude: ['water'],
+    stats: { ...standingWolfBase.stats, dmg: 60, magDmg: 3, atkSpd: 2.6 },
+    lvl: 28,
+    hp: 11000,
+    maxHp: 11000,
+    expToGain: 2600,
+    loots: [coreDetails_1.mediumCoreLoot, coreDetails_1.celestineOreLoot, meatLoots_1.beastMeatLoot],
+};
 function scatterPosition(areaType, half, minRadius, maxRadius) {
     let x, z;
     if (areaType === "fixed") {
@@ -548,7 +907,9 @@ function scatterPosition(areaType, half, minRadius, maxRadius) {
     }
     return { x, z };
 }
-function generateEnemies(base, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius) {
+// keepOut (optional): a spot it returns true for is rolled again, like the
+// castles' - how the dark slimes stay away from the witch towers
+function generateEnemies(base, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius, keepOut) {
     const half = areaSize / 2;
     const enemies = [];
     for (let i = 0; i < total; i++) {
@@ -558,6 +919,16 @@ function generateEnemies(base, total, placeId, areaSize, areaType, centerX, cent
         // region isn't at (0,0) (infterrain's own SPAWN_X/SPAWN_Z is (0, 500))
         x += centerX;
         z += centerZ;
+        // openworld castles (castles.ts) - a spot in or beside one is rolled
+        // again. The margin is more than index.ts's WANDER_RADIUS (8), which is
+        // all an enemy ever strays from its spawn on its own, so wandering
+        // never walks one into a castle wall either. "fixed" spawns are
+        // placed on purpose and left alone.
+        for (let tries = 0; placeId === 888 && areaType !== "fixed" && ((0, castles_1.isNearCastle)(x, z, CASTLE_SPAWN_MARGIN) || keepOut?.(x, z)) && tries < 20; tries++) {
+            const again = scatterPosition(areaType, half, minRadius, maxRadius);
+            x = again.x + centerX;
+            z = again.z + centerZ;
+        }
         const y = 0;
         enemies.push({
             ...base,
@@ -581,7 +952,8 @@ function generateElectricSlimes(total = 10, placeId = 1, areaSize = 300, areaTyp
     return generateEnemies(electricSlimeBase, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius);
 }
 function generateDarkSlimes(total = 10, placeId = 1, areaSize = 300, areaType = "village", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
-    return generateEnemies(darkSlimeBase, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius);
+    // the strongest of the slimes - kept off the witch towers' doorsteps
+    return generateEnemies(darkSlimeBase, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius, (x, z) => (0, witchTowers_1.isNearWitchTower)(x, z));
 }
 function generateMonoliths(total = 5, placeId = 1, areaSize = 300, areaType = "village", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
     return generateEnemies(monolithBase, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius);
@@ -604,6 +976,16 @@ function generateScorchDeer(total = 10, placeId = 1, areaSize = 300, areaType = 
 function generateWisfDeer(total = 10, placeId = 1, areaSize = 300, areaType = "village", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
     return generateEnemies(wisfDeer, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius);
 }
+// the openworld's deer band (enemyDetails.ts's OPENWORLD_ENEMY_BANDS) - each
+// one spawned is any of the six deer, rolled per deer, so a herd out there is
+// a mix of every coat
+const DEER_VARIANTS = [forestDeer, jasferDeer, luminaDeer, nightmareDeer, scorchDeer, wisfDeer];
+function generateWildDeer(total = 10, placeId = 1, areaSize = 300, areaType = "village", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
+    return Array.from({ length: total }, () => {
+        const variant = DEER_VARIANTS[Math.floor(Math.random() * DEER_VARIANTS.length)];
+        return generateEnemies(variant, 1, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius)[0];
+    });
+}
 function generateLesserDemons(total = 1, placeId = 1, areaSize = 300, areaType = "fixed", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
     return generateEnemies(lesserDemonBase, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius);
 }
@@ -615,4 +997,17 @@ function generateLesserDemons(total = 1, placeId = 1, areaSize = 300, areaType =
 // same areaSize convention) as centerX/centerZ/areaSize.
 function generateGhosts(total = 5, placeId = 1, areaSize = 10, areaType = "square", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
     return generateEnemies(ghostBase, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius);
+}
+function generateStrayWolves(total = 5, placeId = 1, areaSize = 300, areaType = "village", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
+    return generateEnemies(strayWolfBase, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius);
+}
+// one of the four standing wolves by name ("vargoth", "zareth", "morvane",
+// "skallgrim") - each is a single named elite, so total defaults to 1 and
+// areaType to "fixed" (exactly at centerX, centerZ)
+const STANDING_WOLVES = { vargoth, zareth, morvane, skallgrim };
+function generateStandingWolf(name, total = 1, placeId = 1, areaSize = 300, areaType = "fixed", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
+    return generateEnemies(STANDING_WOLVES[name], total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius);
+}
+function generateIceScorpions(total = 1, placeId = 1, areaSize = 10, areaType = "square", centerX = 0, centerZ = 0, minRadius = 0, maxRadius = 0) {
+    return generateEnemies(iceScorpionBase, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius);
 }
