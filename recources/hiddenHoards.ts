@@ -19,6 +19,11 @@ import { HIDDEN_PLACES, ThiddenPlace, ThiddenSpot } from "./hiddenPlaces"
 //    creategroundweapon.js) - in every cave behind the falls, in some wells
 //    and grottos
 //  - a patch of the rarest mushrooms (mushroomLibrary.ts)
+//  - in a grotto's maze: a skill tome at its very end (the dead end furthest
+//    from the way in) - a "chest" the client draws as a floating book1.glb
+//    in an aura of its rarity (look: "tome", its tomeLoot.js) - and the
+//    blades of whoever never found the way out, struck in its floor (a step
+//    below the hoard's own pieces: rare and epic)
 //
 // The further a place is from the spawn, the likelier its pieces are mythic
 // rather than legendary. Every record carries exactY: down a well the ground
@@ -77,7 +82,7 @@ const rollRarity = (place: ThiddenPlace): Trarity =>
 // the inventory shows a sword or spear by its weaponType. A firecrystal part
 // glows, and carries fire (itemDictionary.js's weaponElements): it cuts ghosts.
 type TweaponTemplate = {
-    name: string, dn: string, weaponType: "sword" | "spear", rarity: Trarity,
+    name: string, dn: string, weaponType: "sword" | "spear", rarity: Trarity | TbladeRarity,
     dmg: number, magicDmg?: number, pieces: number, desc: string, parts: any, fire?: boolean,
 }
 const RARE_PARTS = { bladeRarity: "rare2", guardRarity: "rare2", handleRarity: "rare1", pommelRarity: "rare1" }
@@ -187,6 +192,48 @@ function weaponItem(t: TweaponTemplate) {
 const rollWeapon = (rarity: Trarity, struck = false) =>
     weaponItem(pick(WEAPONS.filter(w => w.rarity === rarity && !(struck && glows(w)))))
 
+// ── The blades in a grotto's maze ────────────────────────────────────────────
+// Struck where whoever carried them never found the way out - good steel, a
+// step or two below the hoard's own pieces, so a maze is worth walking again.
+// Plain metal only, like every struck one (glows() above).
+type TbladeRarity = "rare" | "epic"
+const RARE1_PARTS = { bladeRarity: "rare1", guardRarity: "rare1", handleRarity: "rare1", pommelRarity: "rare1" }
+const BLADES: TweaponTemplate[] = [
+    {
+        name: "lostwaylongsword", dn: "Lostway Longsword", weaponType: "sword", rarity: "rare", dmg: 22, pieces: 95,
+        desc: "Point-down in the floor of a dead end, as if whoever carried it stopped to rest and never got up again.",
+        parts: { ...RARE1_PARTS, bladeColor: "steel", guardColor: "bronze", handleColor: "leather", pommelColor: "iron" },
+    },
+    {
+        name: "cragfalchion", dn: "Crag Falchion", weaponType: "sword", rarity: "rare", dmg: 21, pieces: 90,
+        desc: "A heavy iron falchion, notched from the walls of a maze it swung at in the dark.",
+        parts: { ...RARE1_PARTS, bladeColor: "iron", guardColor: "silver", handleColor: "wood", pommelColor: "bronze" },
+    },
+    {
+        name: "pathfinderpike", dn: "Pathfinder's Pike", weaponType: "spear", rarity: "rare", dmg: 21, pieces: 90,
+        desc: "Its owner marked the way with scratches on the walls. The scratches stop a few turns before this.",
+        parts: { ...SPEAR_PARTS, bladeColor: "steel", guardColor: "iron", handleColor: "wood", pommelColor: "iron" },
+    },
+    {
+        name: "mazewalkerblade", dn: "Mazewalker's Blade", weaponType: "sword", rarity: "epic", dmg: 28, pieces: 190,
+        desc: "Mythril, kept bright through every turn of the maze - its owner walked it many times, and the last time did not walk out.",
+        parts: { ...RARE_PARTS, bladeColor: "mythril", guardColor: "silver", handleColor: "leather", pommelColor: "gold" },
+    },
+    {
+        name: "lastlight", dn: "Last Light", weaponType: "sword", rarity: "epic", dmg: 27, magicDmg: 4, pieces: 200,
+        desc: "A silver blade with a gilded guard. It catches what little light reaches the maze, and holds it a moment longer.",
+        parts: { ...RARE_PARTS, bladeColor: "silver", guardColor: "gold", handleColor: "bone", pommelColor: "silver" },
+    },
+    {
+        name: "deepwalkerspear", dn: "Deepwalker Spear", weaponType: "spear", rarity: "epic", dmg: 26, pieces: 180,
+        desc: "An adamantine point on a shaft of bone, set down where the passage ended and never taken up again.",
+        parts: { ...SPEAR_PARTS, bladeColor: "adamantine", guardColor: "bronze", handleColor: "bone", pommelColor: "bronze" },
+    },
+]
+// a blade's odds of being epic rather than rare, at the nearest grotto .. the furthest
+const EPIC_NEAR = 0.25
+const EPIC_FAR = 0.6
+
 // ── Armour ───────────────────────────────────────────────────────────────────
 // every metal-tinted piece either archetype wears - its metal sets its rarity
 // (botItems.ts's METAL_TIERS): dragonscale is legendary, black mythic
@@ -287,6 +334,53 @@ function rollFood() {
     return lunaraqum(randInt(2, 3))
 }
 
+// ── The tome at the end of a grotto's maze ───────────────────────────────────
+// A skill book (the client's skillBooks.js makeSkillBook shape - it fills in
+// the book's description from the skill when it's taken). Its rarity rides on
+// the skill's rank as the witches' books do (rare: rank 2, epic: 3,
+// legendary: 4), and a rank-4 one can turn up mythic - the client's tome
+// ceremony and the book's aura both play up to it. Further out, rarer.
+type TtomeRarity = "rare" | "epic" | "legendary" | "mythic"
+// [the client's skillsData.js name, its displayName, its skillrank] - not
+// crescenthowl: only Sable teaches that one
+const TOME_SKILLS: [string, string, number][] = [
+    ["thunderstrike", "Thunderstrike", 2], ["lightpierce", "Lightpierce", 2], ["radiantjudgment", "Radiant Judgment", 2],
+    ["shadowbolt", "Shadowbolt", 2], ["voidrend", "Voidrend", 2], ["pyroclasm", "Pyroclasm", 2],
+    ["solarcataclysm", "Solar Cataclysm", 2], ["tsunamiwrath", "Tsunami Wrath", 2], ["abyssalcurrent", "Abyssal Current", 2],
+    ["continentalrend", "Continental Rend", 2], ["seismicjudgment", "Seismic Judgment", 2], ["celestialverdict", "Celestial Verdict", 2],
+    ["seraphicascension", "Seraphic Ascension", 2], ["voidcurse", "Void Curse", 2], ["abyssaldamnation", "Abyssal Damnation", 2],
+    ["zoltraak", "Zoltraak", 2],
+    ["burstshots", "Burst Shots", 3], ["disintegration", "Disintegration", 3], ["mjolnir", "Mjolnir", 3],
+    ["wellspring", "Wellspring", 3], ["purification", "Purification", 3],
+    ["astralrain", "Astral Rain", 4], ["darkorb", "Dark Orb", 4], ["multicast", "Multicast", 4],
+    ["massivedisintegration", "Massive Disintegration", 4], ["meteor", "Meteor", 4], ["thunderclap", "Thunderclap", 4],
+]
+const TOME_RANK: Record<TtomeRarity, number> = { rare: 2, epic: 3, legendary: 4, mythic: 4 }
+// skillBooks.js's SKILLBOOK_PRICE_BY_RANK, and a mythic printing above it
+const TOME_PRICE: Record<TtomeRarity, number> = { rare: 220, epic: 500, legendary: 1100, mythic: 1600 }
+// the odds of each rarity at the nearest grotto, and at the furthest
+const TOME_ODDS_NEAR: [TtomeRarity, number][] = [["rare", 50], ["epic", 32], ["legendary", 15], ["mythic", 3]]
+const TOME_ODDS_FAR: [TtomeRarity, number][] = [["rare", 15], ["epic", 35], ["legendary", 35], ["mythic", 15]]
+function rollTomeRarity(place: ThiddenPlace): TtomeRarity {
+    const t = farOut(place)
+    return weighted(TOME_ODDS_NEAR.map(([rarity, near], i) => [rarity, near + (TOME_ODDS_FAR[i][1] - near) * t] as [TtomeRarity, number]))
+}
+function tomeItem(rarity: TtomeRarity) {
+    const [skillName, displayName] = pick(TOME_SKILLS.filter(([, , rank]) => rank === TOME_RANK[rarity]))
+    return {
+        itemId: randNumString(),
+        // the skill's own name, as every skill book's (it stacks with its copies)
+        name: skillName,
+        skillName,
+        dn: `Tome of ${displayName}`,
+        itemCateg: "skillbook",
+        itemType: "skillbook",
+        price: { coinType: "bronze", pieces: TOME_PRICE[rarity] },
+        qnty: 1,
+        rarity,
+    }
+}
+
 // ── The chest ────────────────────────────────────────────────────────────────
 // its headline piece (the chest's skin follows its rarity), then the rest
 function rollChestContents(place: ThiddenPlace) {
@@ -325,11 +419,40 @@ function hoardWeapon(place: ThiddenPlace) {
         ownerId: "hiddenhoard", exactY: true, hoardKey: place.key,
     }
 }
+// one of a grotto's blades - `blade` is which of its spots, so the one that
+// comes back stands where it did
+function hoardBlade(place: ThiddenPlace, blade: number) {
+    const pos = at(place.blades[blade], 0.02)
+    const rarity: TbladeRarity = Math.random() < EPIC_NEAR + (EPIC_FAR - EPIC_NEAR) * farOut(place) ? "epic" : "rare"
+    const item = weaponItem(pick(BLADES.filter(b => b.rarity === rarity)))
+    return {
+        itemId: item.itemId, pos, currentPlaceId: OPENWORLD_PLACE_ID,
+        itemDetail: { ...item, lootPosition: pos },
+        ownerId: "hiddenhoard", exactY: true, hoardKey: place.key, blade,
+    }
+}
 /** A taken hidden-place weapon's replacement: when, and the new one then. null for any other struck weapon. */
 export function hoardWeaponRespawnOf(taken: any) {
     const place = taken?.hoardKey && placeByKey(taken.hoardKey)
-    return place ? { afterMs: HOARD_RESPAWN_MS, make: () => hoardWeapon(place) } : null
+    if (!place) return null
+    const blade = taken.blade
+    if (typeof blade === "number") return place.blades[blade] ? { afterMs: HOARD_RESPAWN_MS, make: () => hoardBlade(place, blade) } : null
+    return { afterMs: HOARD_RESPAWN_MS, make: () => hoardWeapon(place) }
 }
+
+// the tome at the end of a grotto's maze: a chest to index.ts (claimed, taken
+// with removeTreasure, back rolled anew HOARD_RESPAWN_MS later) that the
+// client draws as a book (look)
+function hoardTome(place: ThiddenPlace) {
+    return {
+        ...createTreasure(at(place.tome!), OPENWORLD_PLACE_ID, tomeItem(rollTomeRarity(place))),
+        exactY: true, hoardKey: place.key, respawns: "hiddenTome", look: "tome",
+    }
+}
+addRespawningChest("hiddenTome", {
+    afterMs: HOARD_RESPAWN_MS,
+    make: opened => hoardTome(placeByKey(opened.hoardKey)),
+})
 
 function hoardPatch(place: ThiddenPlace): Tmushroom[] {
     const { kind } = rollRarestKind()
@@ -346,12 +469,18 @@ function hoardPatch(place: ThiddenPlace): Tmushroom[] {
 }
 
 export const HIDDEN_TREASURES = HIDDEN_PLACES.map(hoardChest)
-export const HIDDEN_WEAPONS = HIDDEN_PLACES.filter(p => Math.random() < WEAPON_CHANCE[p.kind]).map(hoardWeapon)
+export const HIDDEN_TOMES = HIDDEN_PLACES.filter(p => p.tome).map(hoardTome)
+export const HIDDEN_WEAPONS = [
+    ...HIDDEN_PLACES.filter(p => Math.random() < WEAPON_CHANCE[p.kind]).map(hoardWeapon),
+    ...HIDDEN_PLACES.flatMap(p => p.blades.map((_, i) => hoardBlade(p, i))),
+]
 export const HIDDEN_MUSHROOMS = HIDDEN_PLACES.flatMap(hoardPatch)
 
 // for index.ts's start-up line
 export function describeHoards() {
     const mythic = [...HIDDEN_TREASURES.map(t => t.itemDetail), ...HIDDEN_WEAPONS.map(w => w.itemDetail)].filter(i => i.rarity === "mythic").length
-    return `${HIDDEN_PLACES.length} places, ${HIDDEN_TREASURES.length} chests, ${HIDDEN_WEAPONS.length} struck weapons, ` +
-        `${HIDDEN_MUSHROOMS.length} mushrooms - ${mythic} mythic pieces`
+    const tomes = HIDDEN_TOMES.reduce((by: Record<string, number>, t) => (by[t.itemDetail.rarity] = (by[t.itemDetail.rarity] ?? 0) + 1, by), {})
+    return `${HIDDEN_PLACES.length} places, ${HIDDEN_TREASURES.length} chests, ${HIDDEN_WEAPONS.length} struck weapons ` +
+        `(${HIDDEN_WEAPONS.filter(w => "blade" in w).length} of them grotto blades), ${HIDDEN_MUSHROOMS.length} mushrooms - ${mythic} mythic pieces; ` +
+        `${HIDDEN_TOMES.length} tomes (${Object.entries(tomes).map(([r, n]) => `${n} ${r}`).join(", ")})`
 }

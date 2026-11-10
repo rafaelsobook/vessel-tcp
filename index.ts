@@ -15,7 +15,7 @@ import { generateSlimes, generateFireSlimes, generateElectricSlimes, generateMon
 import { startingTreasures, respawnOf } from "./recources/treasures"
 import { claimPickup, releasePickup, releaseClaimsOf } from "./recources/pickupClaims"
 import { DUNGEON_TREASURES } from "./recources/treasuresInDungeon"
-import { HIDDEN_TREASURES, HIDDEN_WEAPONS, HIDDEN_MUSHROOMS, hoardWeaponRespawnOf, describeHoards } from "./recources/hiddenHoards"
+import { HIDDEN_TREASURES, HIDDEN_TOMES, HIDDEN_WEAPONS, HIDDEN_MUSHROOMS, hoardWeaponRespawnOf, describeHoards } from "./recources/hiddenHoards"
 import { startingGrains, Tgrain } from "./recources/grains"
 import { DUNGEON_MUSHROOMS, Tmushroom } from "./recources/mushroomsInDungeon"
 import { OPENWORLD_MUSHROOMS } from "./recources/mushroomsInOpenworld"
@@ -218,6 +218,9 @@ type Ttreasure = {
     // to ground on the terrain - and the hidden place it's in (hiddenHoards.ts)
     exactY?: boolean
     hoardKey?: string
+    // how the client draws it - "tome": a floating skill book, not a chest (the
+    // skill tome at the end of a grotto's maze, hiddenHoards.ts)
+    look?: string
 }
 
 // client/src/components/campcraft.js's crafted structures (bonfire for
@@ -280,6 +283,8 @@ type Tstruckweapon = {
     // replaced once it's taken. exactY as on Ttreasure
     exactY?: boolean
     hoardKey?: string
+    // one of a grotto's blades: which of its spots
+    blade?: number
 }
 
 let players: Tplayers[] = []
@@ -305,7 +310,7 @@ let tcpEnemies = enemyArray
 let quests = startingQuests
 // the village's chests, the dungeons' (treasuresInDungeon.ts) and the open
 // world's hidden places' hoards (hiddenHoards.ts)
-let treasures: Ttreasure[] = [...startingTreasures, ...DUNGEON_TREASURES, ...HIDDEN_TREASURES]
+let treasures: Ttreasure[] = [...startingTreasures, ...DUNGEON_TREASURES, ...HIDDEN_TREASURES, ...HIDDEN_TOMES]
 let bonfires: Tbonfire[] = []
 let trunks: Ttrunk[] = []
 let structures: Tstructure[] = []
