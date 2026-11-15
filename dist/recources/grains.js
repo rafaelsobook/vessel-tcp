@@ -20,9 +20,10 @@ const OPENWORLD_CENTER = { x: 0, z: 500 };
 const OPENWORLD_CLUSTER_COUNT = 50;
 const OPENWORLD_MIN_DIST = 40;
 const OPENWORLD_MAX_DIST = 2400;
-// createcastle.js places the castle at (0, 600)
-const CASTLE_POS = { x: 0, z: 600 };
-const CASTLE_CLEARANCE = 60;
+// Hearthwatch, the castle by the crossroads (castles.ts's castle_hub) - no
+// grain inside its walls or on its terrace
+const CASTLE_POS = { x: -29, z: 645 };
+const CASTLE_CLEARANCE = 125;
 const GRAINS_PER_CLUSTER = 10;
 const CLUSTER_RADIUS = 4;
 function randRange(min, max) {

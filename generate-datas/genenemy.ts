@@ -2,6 +2,7 @@ import { randNumString } from "../tools/tools"
 import { simpleCoreLoot, mediumCoreLoot, waterslimeCoreLoot, fireslimeCoreLoot, electricslimeCoreLoot, darkslimeCoreLoot, celestineOreLoot, orangelithCoreLoot } from "../recources/coreDetails"
 import { isNearCastle } from "../recources/castles"
 import { isNearWitchTower } from "../recources/witchTowers"
+import { isInSafeSpawnZone } from "../recources/safeZones"
 import { beastMeatLoot, wolfRibLoot } from "../recources/meatLoots"
 import { SLIME_BASH_ATTACK } from "../recources/enemyAttacks"
 
@@ -927,6 +928,24 @@ function scatterPosition(areaType: string, half: number, minRadius: number, maxR
 
 // keepOut (optional): a spot it returns true for is rolled again, like the
 // castles' - how the dark slimes stay away from the witch towers
+// Every enemy's hp is its template's (the bases above) times this, as it's made.
+// The templates were tuned when a player's weapon blow counted the weapon stat
+// x10 - each Strength point was +100 a swing; it counts x1.15 now (the client's
+// constants.js WEAPON_STAT_DMG), so a mid-level character hits about a fifth
+// as hard, and every enemy has a fifth of its old hp: a swing takes as many
+// swings as it did. Spells were never part of that scale (a flat 70-260 or so),
+// so they now count for something against them. Change it here, not in each base.
+export const ENEMY_HP_SCALE = 0.2
+export const scaledHp = (hp: number) => Math.max(1, Math.round(hp * ENEMY_HP_SCALE))
+
+// And the exp each one gives, as it's made. A water slime's 50 becomes 18, so
+// the client's level curve (characterstate.js's expToNextLevel - 100 to reach
+// level 2, 2,000 for level 3) means about six slimes for level 2 and about a
+// hundred more for level 3. Every enemy scales together, so the climb can't be
+// skipped by killing a few of a richer kind instead.
+export const ENEMY_EXP_SCALE = 0.36
+export const scaledExp = (exp: number) => Math.max(1, Math.round(exp * ENEMY_EXP_SCALE))
+
 function generateEnemies(base: object, total: number, placeId: number, areaSize: number, areaType: string, centerX: number, centerZ: number, minRadius: number, maxRadius: number, keepOut?: (x: number, z: number) => boolean) {
     const half = areaSize / 2
     const enemies = []
@@ -945,7 +964,10 @@ function generateEnemies(base: object, total: number, placeId: number, areaSize:
         // all an enemy ever strays from its spawn on its own, so wandering
         // never walks one into a castle wall either. "fixed" spawns are
         // placed on purpose and left alone.
-        for (let tries = 0; placeId === 888 && areaType !== "fixed" && (isNearCastle(x, z, CASTLE_SPAWN_MARGIN) || keepOut?.(x, z)) && tries < 20; tries++) {
+        // A safe zone (safeZones.ts - the Leadale guard post) is kept clear
+        // the same way, in any place.
+        const rollAgain = () => (placeId === 888 && (isNearCastle(x, z, CASTLE_SPAWN_MARGIN) || keepOut?.(x, z))) || isInSafeSpawnZone(placeId, x, z)
+        for (let tries = 0; areaType !== "fixed" && rollAgain() && tries < 20; tries++) {
             const again = scatterPosition(areaType, half, minRadius, maxRadius)
             x = again.x + centerX
             z = again.z + centerZ
@@ -953,8 +975,13 @@ function generateEnemies(base: object, total: number, placeId: number, areaSize:
 
         const y = 0
 
+        const template = base as { hp?: number, maxHp?: number, expToGain?: number }
         enemies.push({
             ...base,
+            // the template's hp, scaled (ENEMY_HP_SCALE above)
+            ...(template.maxHp != null ? { hp: scaledHp(template.hp ?? template.maxHp), maxHp: scaledHp(template.maxHp) } : {}),
+            // and its exp (ENEMY_EXP_SCALE above)
+            ...(template.expToGain != null ? { expToGain: scaledExp(template.expToGain) } : {}),
             _id: `${randNumString()}`,
             currentPlaceId: placeId,
             x,

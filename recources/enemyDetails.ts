@@ -3,7 +3,7 @@ import { simpleCoreLoot, mediumCoreLoot, waterslimeCoreLoot, fireslimeCoreLoot, 
 import { OPENWORLD_GRAVEYARDS, ghostsForGraveyard } from "./graveyards"
 import { DUNGEON_ENEMIES } from "./enemiesInDungeon"
 import { SLIME_BASH_ATTACK } from "./enemyAttacks"
-import { generateSlimes, generateFireSlimes, generateElectricSlimes, generateMonoliths, generateLesserDemons, generateDarkSlimes, generateWildDeer, generateGhosts, generateStrayWolves, generateStandingWolf } from "../generate-datas/genenemy"
+import { generateSlimes, generateFireSlimes, generateElectricSlimes, generateMonoliths, generateLesserDemons, generateDarkSlimes, generateWildDeer, generateGhosts, generateStrayWolves, generateStandingWolf, scaledHp, scaledExp } from "../generate-datas/genenemy"
 
 let monolithBodyHeight = 2
 
@@ -193,12 +193,13 @@ export default [
             critical: 1.4,
         },
         lvl: 1,
-        hp: 580,
-        maxHp: 580,
+        // placed by hand, so scaled here (genenemy.ts's ENEMY_HP_SCALE) - 580 before
+        hp: scaledHp(580),
+        maxHp: scaledHp(580),
         loots: [waterslimeCoreLoot],
         // own explicit value now, not enemyInterface's shared 999999 debug
         // leftover - weakest slime variant, so the smallest exp
-        expToGain: 50,
+        expToGain: scaledExp(50),
         // deathSound: "slimedeath",
     },
     // fireslime/electricslime - same spot/stats as the waterslime above,
@@ -243,10 +244,11 @@ export default [
             critical: 1.4,
         },
         lvl: 1,
-        hp: 580,
-        maxHp: 580,
+        // placed by hand, so scaled here (genenemy.ts's ENEMY_HP_SCALE) - 580 before
+        hp: scaledHp(580),
+        maxHp: scaledHp(580),
         loots: [fireslimeCoreLoot],
-        expToGain: 200,
+        expToGain: scaledExp(200),
         // deathSound: "slimedeath",
     },
     {...enemyInterface,
@@ -288,10 +290,11 @@ export default [
             critical: 1.4,
         },
         lvl: 1,
-        hp: 580,
-        maxHp: 580,
+        // placed by hand, so scaled here (genenemy.ts's ENEMY_HP_SCALE) - 580 before
+        hp: scaledHp(580),
+        maxHp: scaledHp(580),
         loots: [electricslimeCoreLoot],
-        expToGain: 500,
+        expToGain: scaledExp(500),
         // deathSound: "slimedeath",
     },
     // the deer and the stray wolf that ended this row live in the openworld

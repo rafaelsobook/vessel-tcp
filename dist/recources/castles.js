@@ -8,17 +8,18 @@ exports.isNearCastle = isNearCastle;
 // matter on this side: enemies don't spawn in or next to a castle
 // (genenemy.ts generateEnemies), so their wandering never takes them into one.
 exports.OPENWORLD_CASTLES = [
-    { name: "castle_hub", x: 0, z: 600 },
-    { name: "castle_north", x: 100.6, z: 1500 },
-    { name: "castle_south", x: 80.6, z: -600 },
-    { name: "castle_east", x: 1000.6, z: 380 },
-    { name: "castle_west", x: -974.4, z: 480 },
+    { name: "castle_hub", x: -29, z: 645 },
+    { name: "castle_north", x: 99.9, z: 1601.4 },
+    { name: "castle_south", x: 110.6, z: -600 },
+    { name: "castle_east", x: 1040.1, z: 356.1 },
+    { name: "castle_west", x: -934.4, z: 440 },
 ];
 // Every castle's whole footprint - walls, towers, the terrace they stand on
 // and the ramp down from the gate - fits inside this radius of its centre.
-// createcastle.js sizes each castle to fit its palace; the biggest of the five
-// (castle_north, with the longest gate ramp) reaches 69.
-exports.CASTLE_RADIUS = 72;
+// The castles are ~200 wide and ~115 deep since they became the noble houses'
+// seats (createcastle.js rollLayout: hx 84-94, hz 46-52, plus walls, terrace
+// and a gate ramp of up to ~25): the biggest reaches ~135.
+exports.CASTLE_RADIUS = 140;
 function isNearCastle(x, z, margin = 0) {
     const reach = exports.CASTLE_RADIUS + margin;
     return exports.OPENWORLD_CASTLES.some(c => (x - c.x) ** 2 + (z - c.z) ** 2 < reach * reach);

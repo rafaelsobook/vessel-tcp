@@ -67,6 +67,7 @@ const undead_1 = require("./recources/undead");
 const faker_1 = require("@faker-js/faker");
 const castles_1 = require("./recources/castles");
 const witchTowers_1 = require("./recources/witchTowers");
+const safeZones_1 = require("./recources/safeZones");
 const admin_1 = require("./admin");
 exports.enemyLengthsInPlace = [
     {
@@ -128,7 +129,7 @@ let tcpEnemies = enemyDetails_1.default;
 let quests = quests_1.default;
 // the village's chests, the dungeons' (treasuresInDungeon.ts) and the open
 // world's hidden places' hoards (hiddenHoards.ts)
-let treasures = [...treasures_1.startingTreasures, ...treasuresInDungeon_1.DUNGEON_TREASURES, ...hiddenHoards_1.HIDDEN_TREASURES];
+let treasures = [...treasures_1.startingTreasures, ...treasuresInDungeon_1.DUNGEON_TREASURES, ...hiddenHoards_1.HIDDEN_TREASURES, ...hiddenHoards_1.HIDDEN_TOMES];
 let bonfires = [];
 let trunks = [];
 let structures = [];
@@ -349,6 +350,9 @@ function registerTargetIfNone(enemyId, targetId, dirTarg) {
         return;
     if (enemyTarg._targetId)
         return;
+    // nobody under the guards' protection (safeZones.ts) becomes a target
+    if (isPlayerInSafeZone(targetId))
+        return;
     enemyTarg._targetId = targetId;
     enemyTarg._dirTarg = dirTarg;
     io.emit("registered-playerAsEnemy", tcpEnemies);
@@ -400,6 +404,16 @@ function releaseEnemiesTargeting(deadOwnerId) {
     });
     if (anyReleased)
         io.emit('registered-playerAsEnemy', tcpEnemies);
+}
+// SAFE ZONES (recources/safeZones.ts - the Leadale guard post). The player's
+// last reported position, with a few units' slack: it's a moment old, and
+// the client only says it's inside once it is.
+const SAFE_ZONE_SLACK = 6;
+function isPlayerInSafeZone(owner) {
+    const pl = players.find(p => p.owner === owner);
+    if (!pl?.pos || !pl.currentPlace)
+        return false;
+    return (0, safeZones_1.isInSafeZoneBox)(pl.currentPlace.placeId, pl.pos.x, pl.pos.z, SAFE_ZONE_SLACK);
 }
 // Physical damage after the target's worn armour, for any target id.
 //
@@ -482,7 +496,9 @@ const isRealPlayer = (pl) => !!pl && !pl.owner?.startsWith("bot_");
 const undead = (0, undead_1.createUndeadDirector)({
     emit: (event, data) => io.emit(event, data),
     getPlayer: owner => players.find(pl => pl.owner === owner && isRealPlayer(pl)),
-    openworldPlayers: () => players.filter(pl => isRealPlayer(pl) && pl.currentPlace?.placeId === 888 && pl.pos),
+    // not anyone at the Leadale guard post (safeZones.ts) - the fog's dead
+    // aren't sent after them there
+    openworldPlayers: () => players.filter(pl => isRealPlayer(pl) && pl.currentPlace?.placeId === 888 && pl.pos && !(0, safeZones_1.isInSafeZoneBox)(888, pl.pos.x, pl.pos.z, SAFE_ZONE_SLACK)),
     isNight: dayNight_1.isNightTime,
 });
 io.on("connection", (socket) => {
@@ -1007,7 +1023,9 @@ io.on("connection", (socket) => {
     });
     // QUESTS (guild board)
     safeOn(socket, "emitClaimQuest", data => {
-        const { ownerId, questId, currentPlaceId } = data;
+        // rankLabel: the claimer's guild rank, sent by the client (tcp keeps no
+        // ranks) - missing from an older client, which then counts as F
+        const { ownerId, questId, currentPlaceId, rankLabel } = data;
         const player = players.find(uzr => uzr.owner === ownerId);
         if (!player)
             return log(`no valid player ${ownerId}`);
@@ -1017,6 +1035,12 @@ io.on("connection", (socket) => {
         if (targetQuest.claimed) {
             log(`quest ${questId} already claimed, rejecting ${ownerId}`);
             io.emit("quest-claim-result", { ownerId, questId, currentPlaceId, success: false, reason: "taken" });
+            return;
+        }
+        // a contract up to one rank above your own (quests.ts canTakeContract)
+        if (!(0, quests_1.canTakeContract)(rankLabel, targetQuest.requiredRank.rankLabel)) {
+            log(`${ownerId} (rank ${rankLabel ?? "none"}) can't take rank ${targetQuest.requiredRank.rankLabel} quest ${questId}`);
+            io.emit("quest-claim-result", { ownerId, questId, currentPlaceId, success: false, reason: "rank", requiredRank: targetQuest.requiredRank.rankLabel });
             return;
         }
         // one contract per player - the client checks its own inventory first,
@@ -1174,7 +1198,14 @@ io.on("connection", (socket) => {
     });
     // (respawning is the server's own job now - respawnLater, called when an
     // enemy dies in applyDamageToEnemy - not a client's "respawnEnemy")
-    safeOn(socket, "removeEnemy", enemyId => {
+    // the client no longer sends this on a kill (applyDamageToEnemy already
+    // removes the dead) - kept for anything else that asks. Takes the bare id
+    // or { enemyId }: the client used to send the object, which this read as
+    // the id itself, so it never matched and its echo never removed anything
+    safeOn(socket, "removeEnemy", data => {
+        const enemyId = typeof data === "object" && data !== null ? data.enemyId : data;
+        if (typeof enemyId !== "string")
+            return;
         tcpEnemies = tcpEnemies.filter(enemy => enemy._id !== enemyId);
         console.log("enemy removed ", enemyId);
         console.log("tcpEnemies ", tcpEnemies.length);
@@ -1305,6 +1336,10 @@ io.on("connection", (socket) => {
             console.log("enemyWillAttack not found ", data._id);
             return io.emit("enemy-removed", data._id);
         }
+        // a swing still in flight at someone now under the guards'
+        // protection (safeZones.ts) - dropped, and it doesn't re-take them
+        if (isPlayerInSafeZone(data.targetId))
+            return;
         tcpEnemies.forEach(enem => {
             if (data._id === enem._id) {
                 enem._targetId = data.targetId;
@@ -1380,6 +1415,13 @@ io.on("connection", (socket) => {
     // relay trusts whichever single client emitted it.
     safeOn(socket, "enemyWillCastSkill", data => {
         const { pos } = data;
+        // an enemy this server doesn't have (dead - a client still holding a
+        // ghost of it) casts nothing: told to clean it up instead, the same
+        // answer "enemyWillAttack" gives. A ghost's skills used to land and
+        // could kill - this relay was the one path with no check at all
+        const exist = tcpEnemies.find(enem => enem._id === data._id);
+        if (!exist || exist.hp <= 0)
+            return io.emit("enemy-removed", data._id);
         tcpEnemies.forEach(enem => {
             if (data._id === enem._id) {
                 enem._targetId = data.targetId;
@@ -1390,13 +1432,19 @@ io.on("connection", (socket) => {
         io.emit("enemy-cast-skill", data);
     });
     // an enemy's ranged attack (its rangeAtkDetails - the electric slimes'
-    // lightning, the fire slimes' fireball, orangelith's sonic boom): its
+    // lightning, the fire slimes' fireball, orangelith's sonic boom, the dark
+    // slimes' fury cutters - how many of them its target's client picked rides
+    // along in data.slashes, held to the enemy's own range by every client): its
     // target's own client decides it (client/src/enemies/rangeAttack.js),
     // every client plays it. What it does and how hard it hits come from the
     // enemy's own data here, not the sender's; one at a time per enemy.
     safeOn(socket, "enemyAttackedRange", data => {
         const enem = tcpEnemies.find(e => e._id === data._id);
-        if (!enem?.rangeAtkDetails || enem.hp <= 0)
+        // not here (a ghost a client still holds) - told to clean it up,
+        // like "enemyWillAttack" and "enemyWillCastSkill"
+        if (!enem || enem.hp <= 0)
+            return io.emit("enemy-removed", data._id);
+        if (!enem.rangeAtkDetails)
             return;
         const now = Date.now();
         if (enem._rangeAtkCooldownUntil && now < enem._rangeAtkCooldownUntil)
@@ -1426,6 +1474,19 @@ io.on("connection", (socket) => {
         });
     });
     safeOn(socket, "registerPlayerAsEnemy", data => registerTargetIfNone(data._id, data.targetId, data.dirTarg));
+    // stepped into a safe zone's box (client tools/safeZones.js) - every
+    // enemy after them lets them go, and the fog's dead give up on them
+    safeOn(socket, "enter-safe-zone", data => {
+        const { ownerId, placeId, pos } = data ?? {};
+        const player = players.find(user => user.owner === ownerId);
+        if (!player || !pos)
+            return;
+        if (!(0, safeZones_1.isInSafeZoneBox)(placeId, pos.x, pos.z, SAFE_ZONE_SLACK))
+            return;
+        player.pos = { ...(player.pos ?? {}), ...pos };
+        releaseEnemiesTargeting(ownerId);
+        undead.onPlayerGone(ownerId, "left");
+    });
     safeOn(socket, "enemyWillChase", data => {
         const { currentPlaceId, _id, targetId, actionType } = data;
         tcpEnemies.forEach(enem => {
@@ -3018,6 +3079,9 @@ setInterval(() => {
             return;
         if (isPlayerResting(player))
             return;
+        // at the guard post (safeZones.ts) - nothing's dropped beside them
+        if ((0, safeZones_1.isInSafeSpawnZone)(888, player.pos.x, player.pos.z))
+            return;
         const { center, minDist, maxDist } = enemyDetails_1.OPENWORLD_SLIME_TERRITORY;
         const distFromCenter = Math.hypot(player.pos.x - center.x, player.pos.z - center.z);
         if (distFromCenter < minDist || distFromCenter > maxDist)
@@ -3039,6 +3103,10 @@ setInterval(() => {
         if (band.name === "darkslime" && (0, witchTowers_1.isNearWitchTower)(player.pos.x, player.pos.z))
             return;
         const [newSlime] = band.generator(1, 888, 100, "ring", player.pos.x, player.pos.z, SLIME_SPAWN_DIST_MIN, SLIME_SPAWN_DIST_MAX);
+        // a player just outside the post: every roll can land inside it - skip
+        // this one, the next check rolls again
+        if ((0, safeZones_1.isInSafeSpawnZone)(888, newSlime.x, newSlime.z))
+            return;
         newSlime.territory = enemyDetails_1.OPENWORLD_SLIME_TERRITORY;
         newSlime._id = (0, tools_1.randNumString)();
         newSlime.respawnDetails = {

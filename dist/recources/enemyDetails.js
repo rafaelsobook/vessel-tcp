@@ -185,12 +185,13 @@ exports.default = [
             critical: 1.4,
         },
         lvl: 1,
-        hp: 580,
-        maxHp: 580,
+        // placed by hand, so scaled here (genenemy.ts's ENEMY_HP_SCALE) - 580 before
+        hp: (0, genenemy_1.scaledHp)(580),
+        maxHp: (0, genenemy_1.scaledHp)(580),
         loots: [coreDetails_1.waterslimeCoreLoot],
         // own explicit value now, not enemyInterface's shared 999999 debug
         // leftover - weakest slime variant, so the smallest exp
-        expToGain: 50,
+        expToGain: (0, genenemy_1.scaledExp)(50),
         // deathSound: "slimedeath",
     },
     // fireslime/electricslime - same spot/stats as the waterslime above,
@@ -235,10 +236,11 @@ exports.default = [
             critical: 1.4,
         },
         lvl: 1,
-        hp: 580,
-        maxHp: 580,
+        // placed by hand, so scaled here (genenemy.ts's ENEMY_HP_SCALE) - 580 before
+        hp: (0, genenemy_1.scaledHp)(580),
+        maxHp: (0, genenemy_1.scaledHp)(580),
         loots: [coreDetails_1.fireslimeCoreLoot],
-        expToGain: 200,
+        expToGain: (0, genenemy_1.scaledExp)(200),
         // deathSound: "slimedeath",
     },
     { ...enemyInterface,
@@ -280,10 +282,11 @@ exports.default = [
             critical: 1.4,
         },
         lvl: 1,
-        hp: 580,
-        maxHp: 580,
+        // placed by hand, so scaled here (genenemy.ts's ENEMY_HP_SCALE) - 580 before
+        hp: (0, genenemy_1.scaledHp)(580),
+        maxHp: (0, genenemy_1.scaledHp)(580),
         loots: [coreDetails_1.electricslimeCoreLoot],
-        expToGain: 500,
+        expToGain: (0, genenemy_1.scaledExp)(500),
         // deathSound: "slimedeath",
     },
     // the deer and the stray wolf that ended this row live in the openworld

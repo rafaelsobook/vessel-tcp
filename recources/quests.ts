@@ -85,22 +85,43 @@ const CONTRACT_KINDS: TContractKind[] = [
         desc: "Vargoth, Zareth, Morvane, Skallgrim - the werewolves that walk on two legs. Bring down any one of them. Go prepared, or don't go at all." },
 ]
 
-// What a contract of each rank pays and costs, in bronze (10 bronze = 1 silver,
-// 100 = 1 gold - the client's currencySystem.js). fee is what taking it costs
-// (the client's guildQuest.js). gearChance: the odds the second reward is gear
-// rather than a second food. metals: what that gear can be made of, weighted
-// (botItems.ts's METAL_TIERS keys). bestGear: the full plate and helms too,
-// not only the light pieces.
-type TRankTerms = { coins: number, fee: number, gearChance: number, bestGear: boolean, metals: Record<string, number> }
-const RANK_TERMS: Record<TRank, TRankTerms> = {
-    f: { coins: 100,  fee: 10,  gearChance: 0.3,  bestGear: false, metals: { iron: 40, bronze: 30, steel: 18, silver: 12 } },
-    e: { coins: 150,  fee: 15,  gearChance: 0.45, bestGear: false, metals: { iron: 25, bronze: 30, steel: 25, silver: 20 } },
-    d: { coins: 220,  fee: 25,  gearChance: 0.55, bestGear: false, metals: { bronze: 20, steel: 35, silver: 30, gold: 15 } },
-    c: { coins: 320,  fee: 40,  gearChance: 0.65, bestGear: true,  metals: { steel: 30, silver: 30, gold: 25, ruby: 15 } },
-    b: { coins: 450,  fee: 60,  gearChance: 0.75, bestGear: true,  metals: { gold: 35, ruby: 35, mythril: 30 } },
-    a: { coins: 700,  fee: 100, gearChance: 0.9,  bestGear: true,  metals: { mythril: 45, adamantine: 40, dragonscale: 15 } },
-    s: { coins: 1000, fee: 150, gearChance: 1,    bestGear: true,  metals: { adamantine: 50, dragonscale: 40, black: 10 } },
+// WHAT A CONTRACT PAYS AND COSTS - in bronze (10 bronze = 1 silver, 100 = 1
+// gold - the client's currencySystem.js). Every contract pays its rank's bronze,
+// a ration, and either gear or a second ration.
+//
+// The rules (tcp/tools/checkContractTerms.ts checks them - run it after any change):
+//  1. Everything climbs with rank, strictly: the bronze, the odds the second
+//     reward is gear, the metal that gear is made of, the fee, and what you
+//     keep once the fee is paid.
+//  2. Gear metal follows rank. A rank draws from a band of at most three
+//     neighbouring metals on botItems.ts's METAL_TIERS ladder (iron, bronze,
+//     steel, silver, gold, ruby, mythril, adamantine, dragonscale, black), and
+//     the band only moves up: F is plain iron and bronze, steel starts at E,
+//     silver at D, gold at C, ruby at B, mythril at A, dragonscale only at S.
+//  3. The fee is a share of what a contract of that rank is worth on average
+//     (contractWorth: its bronze + its ration + its gear odds x that gear's
+//     average sell price). The share starts at FEE_SHARE_F and rises
+//     FEE_SHARE_STEP a rank: a high contract is a bigger stake, and the fee
+//     isn't refunded on cancel, so it is also what keeps a fresh adventurer
+//     from tying up a contract they can't finish. It never takes more than a
+//     quarter of the pay.
+//
+// coins: what it pays (client/src/sidestories/worth.js GUILD_PAY scales the
+// side stories by these - change one, change the other). gearChance: the odds
+// the second reward is gear. bestGear: the full plate and helms too, not only
+// the light pieces. metals: what that gear can be made of, weighted.
+type TRankTerms = { coins: number, gearChance: number, bestGear: boolean, metals: Record<string, number> }
+export const RANK_TERMS: Record<TRank, TRankTerms> = {
+    f: { coins: 100,  gearChance: 0.3,  bestGear: false, metals: { iron: 60, bronze: 40 } },
+    e: { coins: 150,  gearChance: 0.45, bestGear: false, metals: { iron: 30, bronze: 50, steel: 20 } },
+    d: { coins: 220,  gearChance: 0.55, bestGear: false, metals: { bronze: 20, steel: 50, silver: 30 } },
+    c: { coins: 320,  gearChance: 0.65, bestGear: true,  metals: { steel: 25, silver: 45, gold: 30 } },
+    b: { coins: 450,  gearChance: 0.75, bestGear: true,  metals: { silver: 15, gold: 45, ruby: 40 } },
+    a: { coins: 700,  gearChance: 0.9,  bestGear: true,  metals: { ruby: 25, mythril: 45, adamantine: 30 } },
+    s: { coins: 1000, gearChance: 1,    bestGear: true,  metals: { adamantine: 50, dragonscale: 42, black: 8 } },
 }
+export const FEE_SHARE_F = 0.1
+export const FEE_SHARE_STEP = 0.025
 
 // CONTRACT REWARDS - food every time, plus either gear or a second food.
 // Hand-mirrored from the client's own definitions (staticRecources/foodItems.js's
@@ -169,7 +190,7 @@ function makeRewardFood(food: typeof REWARD_FOODS[number]) {
 }
 function rollContractRewards(rank: TRank): any[] {
     const terms = RANK_TERMS[rank]
-    const foods = REWARD_FOODS.filter(f => rankAtLeast(rank, f.minRank))
+    const foods = rationsFor(rank)
     const firstFood = pickOne(foods)
     const rewards: any[] = [makeRewardFood(firstFood)]
     if(Math.random() < terms.gearChance){
@@ -179,6 +200,55 @@ function rollContractRewards(rank: TRank): any[] {
         rewards.push(makeRewardFood(pickOne(foods.filter(f => f !== firstFood))))
     }
     return rewards
+}
+
+// ── what a contract is worth, and so what it costs ──────────────────────────
+// Selling is at full price, so a reward is worth its price.
+function rationsFor(rank: TRank) {
+    return REWARD_FOODS.filter(f => rankAtLeast(rank, f.minRank))
+}
+/** one ration's average worth - makeRewardFood gives 1..maxQnty of it */
+function avgRationWorth(rank: TRank) {
+    const foods = rationsFor(rank)
+    return foods.reduce((sum, f) => sum + f.price * (1 + f.maxQnty) / 2, 0) / foods.length
+}
+/** the gear's average sell price, over the rank's pieces and its metal weights */
+export function avgGearWorth(rank: TRank) {
+    const terms = RANK_TERMS[rank]
+    const pool = terms.bestGear ? ALL_METAL_GEAR : LIGHT_GEAR
+    const totalWeight = Object.values(terms.metals).reduce((sum, w) => sum + w, 0)
+    let worth = 0
+    for(const template of pool){
+        for(const [metal, weight] of Object.entries(terms.metals)){
+            worth += buildEquipableItem(template, metal).price.pieces * weight / totalWeight / pool.length
+        }
+    }
+    return worth
+}
+/** what a contract of this rank pays on average, in bronze */
+export function contractWorth(rank: TRank) {
+    const terms = RANK_TERMS[rank]
+    return terms.coins + avgRationWorth(rank)
+        + terms.gearChance * avgGearWorth(rank) + (1 - terms.gearChance) * avgRationWorth(rank)
+}
+export function feeShare(rank: TRank) {
+    return FEE_SHARE_F + FEE_SHARE_STEP * RANK_ORDER.indexOf(rank)
+}
+/** what taking a contract of this rank costs - its share of the worth, rounded DOWN to 5 (never in the guild's favour) */
+export const RANK_FEES = Object.fromEntries(RANK_ORDER.map(rank =>
+    [rank, Math.max(5, Math.floor(contractWorth(rank) * feeShare(rank) / 5) * 5)]
+)) as Record<TRank, number>
+
+// ── who may take what ───────────────────────────────────────────────────────
+// A contract can be taken up to CONTRACT_RANKS_ABOVE ranks above your own, and
+// at any rank below. Finishing one adds its rankPoints (its rank's number + 1)
+// to your rank (the client's characterstate.js evaluateRank). The client's
+// guildQuest.js mirrors this to grey out the button; index.ts's emitClaimQuest
+// is what holds. Someone not yet ranked (never registered) counts as F.
+export const CONTRACT_RANKS_ABOVE = 1
+export function canTakeContract(playerRank: string | undefined, contractRank: TRank) {
+    const mine = Math.max(0, RANK_ORDER.indexOf(playerRank as TRank))
+    return RANK_ORDER.indexOf(contractRank) <= mine + CONTRACT_RANKS_ABOVE
 }
 
 // A new contract of this rank, hung at pos on its rank's board. Any of the
@@ -197,7 +267,7 @@ export function createContract(rank: TRank, pos: { x: number, y: number, z: numb
         questRequirements: { reqType: "monster", modelStyle: kind.image, name: kind.names[0], names: kind.names, targetDn: kind.targetDn,
             current: 0, requiredNum: kind.requiredNum, completed: false },
         reward: { receiveRewardType: "bronze", rewardItems: rollContractRewards(rank), rewardCoin: terms.coins },
-        rankPoints: RANK_ORDER.indexOf(rank) + 1, // for when contracts raise your rank
+        rankPoints: RANK_ORDER.indexOf(rank) + 1, // added to your rank when you report it
         requiredRank: { rankNumber: RANK_ORDER.indexOf(rank), rankLabel: rank },
         board: boardOfRank(rank),
         pos,
@@ -205,7 +275,7 @@ export function createContract(rank: TRank, pos: { x: number, y: number, z: numb
         // owner id of whoever holds it - one contract per player (index.ts's emitClaimQuest)
         claimedBy: null as string | null,
         // what taking the contract costs - paid by the client once the claim succeeds
-        price: { coinType: "bronze", pieces: terms.fee },
+        price: { coinType: "bronze", pieces: RANK_FEES[rank] },
     }
 }
 export type TContract = NonNullable<ReturnType<typeof createContract>>

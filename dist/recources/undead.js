@@ -5,6 +5,7 @@ exports.undeadCountFor = undeadCountFor;
 exports.createUndeadDirector = createUndeadDirector;
 const tools_1 = require("../tools/tools");
 const botItems_1 = require("./botItems");
+const graveyards_1 = require("./graveyards");
 // ============================================================
 // THE UNDEAD
 // ============================================================
@@ -20,6 +21,18 @@ const botItems_1 = require("./botItems");
 //
 // At night they rise twice as strong. When the fog lifts they drop where they
 // stand - wiped here and on every client.
+//
+// THE GRAVEYARDS AT NIGHT. Fog or not, once it is night a graveyard
+// (graveyards.ts) wakes when a player comes within GRAVE_WAKE_PAST_FENCE of its
+// fence: GRAVE_COUNT dead claw out of the plot, and one giant - GIANT.scale
+// times their size - out of its middle, all of them after whoever is near
+// (the nearest gets the giant). A plot rises once a night: kill all of it and
+// it stays quiet till the next one. If they crumble instead - their player
+// died, left, or got more than GRAVE_LEASH from the plot - it can wake again
+// GRAVE_REARM_MS later. Dawn takes every one still standing.
+//
+// Every undead, fog or grave, comes up out of the ground first (the client's
+// rosefromground clip): for RISE_MS it neither moves, swings nor takes a blow.
 //
 // The client builds each one like a player (createcharacter.js, det.race
 // "undead": avatar.glb's skeleton wearing whatever armour it rose in), but
@@ -66,6 +79,21 @@ const FOG_SWEEP_MS = 5000;
 // every client nearby. These keep a fog survivable for the machine too.
 const MAX_PER_PLAYER = 10;
 const MAX_UNDEAD = 40;
+// avatar.glb's rosefromground clip is 1.5 s - this covers it and the settle
+// into its guard (client/src/enemies/undead.js's RISE)
+const RISE_MS = 1800;
+// ── the graveyards ──
+const GRAVE_SWEEP_MS = 1000;
+// a player this far outside a plot's fence wakes it
+const GRAVE_WAKE_PAST_FENCE = 35;
+// how many ordinary dead come up, the giant not counted
+const GRAVE_COUNT = [3, 5];
+// they give up on a target this far from their plot's middle, and sink back
+const GRAVE_LEASH = 150;
+const GRAVE_REARM_MS = 30000;
+// the one out of the middle. Slower than a sprint (3.7), so it can be outrun;
+// its reach is a 3x arm and blade
+const GIANT = { scale: 3, hpMult: 4, dmgMult: 1.6, speed: 3.4, meleeRange: 4.6, hitRange: 5.6 };
 // ── fighting ──
 const ELITE_LEVEL = 10;
 const NIGHT_MULT = 2;
@@ -193,9 +221,11 @@ function createUndeadDirector(hooks) {
         setTimeout(() => { if (u.alive && u.gen === gen)
             fn(); }, ms);
     }
-    function makeUndead(target, lvl, elite, night, x, z, slot) {
+    function makeUndead(target, lvl, elite, night, x, z, slot, { plot = null, giant = false } = {}) {
         const owner = `undead_${(0, tools_1.randNumString)()}`;
-        const { maxHp, dmg } = statsFor(lvl, night);
+        const stats = statsFor(lvl, night);
+        const maxHp = giant ? Math.round(stats.maxHp * GIANT.hpMult) : stats.maxHp;
+        const dmg = giant ? Math.round(stats.dmg * GIANT.dmgMult) : stats.dmg;
         const items = buildUndeadItems(elite);
         const weapon = items.find(itm => itm.itemType === "weapon");
         const player = {
@@ -205,7 +235,7 @@ function createUndeadDirector(hooks) {
             // createcharacter.js only wires a player's melee blows onto bodies
             // that carry a socketId - see its "OPEN PVP" block
             socketId: `undead-socket-${owner}`,
-            name: night ? "Nightrisen" : "Risen",
+            name: giant ? (night ? "Nightrisen Colossus" : "Risen Colossus") : night ? "Nightrisen" : "Risen",
             lvl,
             gender: "male",
             race: "undead",
@@ -232,14 +262,23 @@ function createUndeadDirector(hooks) {
             targetId: target.owner,
             elite,
             night,
+            // the client scales the whole body by this (enemies/undead.js)
+            scale: giant ? GIANT.scale : 1,
+            giant,
+            graveyard: plot !== null,
         };
         const now = Date.now();
         return {
             owner, player, targetId: target.owner, elite, dmg, hp: maxHp, maxHp,
             weaponName: weapon?.name, weaponType: weapon?.weaponType ?? "sword",
-            x, z, yaw: Math.atan2(target.pos.x - x, target.pos.z - z), moving: false, speed: exports.UNDEAD_SPEED,
-            slot, alive: true, triumphing: false,
-            busyUntil: 0, gen: 0, invulnerableUntil: 0, blockingUntil: 0,
+            x, z, yaw: Math.atan2(target.pos.x - x, target.pos.z - z), moving: false, speed: giant ? GIANT.speed : exports.UNDEAD_SPEED,
+            slot, plot, giant,
+            meleeRange: giant ? GIANT.meleeRange : MELEE_RANGE,
+            hitRange: giant ? GIANT.hitRange : HIT_RANGE,
+            risingUntil: now + RISE_MS,
+            alive: true, triumphing: false,
+            // up out of the ground before it does anything
+            busyUntil: now + RISE_MS, gen: 0, invulnerableUntil: 0, blockingUntil: 0,
             nextDecisionAt: now, nextSwingAt: now, nextDodgeAt: now, nextBlockAt: now,
             nextJumpAt: now + 2000, nextDashAt: now + 3000, nextBlinkAt: now + 4000, nextHealAt: now,
             sentYaw: NaN, sentMoving: false,
@@ -263,7 +302,82 @@ function createUndeadDirector(hooks) {
             spawned.push(makeUndead(target, lvl, elite, night, x, z, (i / count) * TAU + baseAngle));
         }
         undeads.push(...spawned);
-        hooks.emit("undead-spawned", { undeads: spawned.map(u => u.player) });
+        // rising: fresh out of the ground - every client plays the climb
+        hooks.emit("undead-spawned", { undeads: spawned.map(u => u.player), rising: true });
+    }
+    // ── the graveyards ──
+    // per plot: cleared - every one of tonight's dead killed, quiet till the
+    // next night; rearmAt - crumbled, can wake again from then
+    const plots = graveyards_1.OPENWORLD_GRAVEYARDS.map(() => ({ cleared: false, rearmAt: 0 }));
+    let wasNight = false;
+    function spawnAtGraveyard(index, near) {
+        const plot = graveyards_1.OPENWORLD_GRAVEYARDS[index];
+        const room = MAX_UNDEAD - undeads.length;
+        if (room <= 0)
+            return;
+        const lead = near[0];
+        const lvl = Math.max(1, lead.lvl ?? 1);
+        const elite = lvl >= ELITE_LEVEL;
+        const night = hooks.isNight();
+        const cx = plot.position.x;
+        const cz = plot.position.z;
+        const half = plot.areaSize / 2;
+        // the giant out of the middle, after the nearest of them
+        const spawned = [makeUndead(lead, lvl, elite, night, cx, cz, 0, { plot: index, giant: true })];
+        const count = Math.min(room - 1, GRAVE_COUNT[0] + Math.floor(Math.random() * (GRAVE_COUNT[1] - GRAVE_COUNT[0] + 1)));
+        const baseAngle = Math.random() * TAU;
+        for (let i = 0; i < count; i++) {
+            // round the giant, among the graves - clear of its own feet
+            const angle = baseAngle + (i / count) * TAU + rand(-0.3, 0.3);
+            const r = half * rand(0.3, 0.65);
+            // shared out over everyone near, nearest first
+            const target = near[(i + 1) % near.length];
+            spawned.push(makeUndead(target, lvl, elite, night, cx + Math.sin(angle) * r, cz + Math.cos(angle) * r, (i / count) * TAU + baseAngle, { plot: index }));
+        }
+        undeads.push(...spawned);
+        hooks.emit("undead-spawned", { undeads: spawned.map(u => u.player), rising: true });
+    }
+    function sweepGraveyards() {
+        if (!hooks.isNight()) {
+            if (!wasNight)
+                return;
+            wasNight = false;
+            crumble(undeads.filter(u => u.plot !== null), "dawn");
+            plots.forEach(p => { p.cleared = false; p.rearmAt = 0; });
+            return;
+        }
+        wasNight = true;
+        const players = hooks.openworldPlayers();
+        if (!players.length)
+            return;
+        const now = Date.now();
+        graveyards_1.OPENWORLD_GRAVEYARDS.forEach((plot, index) => {
+            const state = plots[index];
+            if (state.cleared || now < state.rearmAt)
+                return;
+            if (undeads.some(u => u.alive && u.plot === index))
+                return;
+            const reach = plot.areaSize / 2 + GRAVE_WAKE_PAST_FENCE;
+            const { x, z } = plot.position;
+            // a square plot - within `reach` of its fence on both axes
+            const near = players
+                .filter(pl => Math.abs(pl.pos.x - x) <= reach && Math.abs(pl.pos.z - z) <= reach)
+                .sort((a, b) => Math.hypot(a.pos.x - x, a.pos.z - z) - Math.hypot(b.pos.x - x, b.pos.z - z));
+            if (near.length)
+                spawnAtGraveyard(index, near);
+        });
+    }
+    // a plot that has just lost its last one: all killed - quiet till the next
+    // night; otherwise it can wake again in a while
+    function plotEmptied(list, killed) {
+        new Set(list.map(u => u.plot).filter((p) => p !== null)).forEach(index => {
+            if (undeads.some(u => u.alive && u.plot === index))
+                return;
+            if (killed)
+                plots[index].cleared = true;
+            else
+                plots[index].rearmAt = Date.now() + GRAVE_REARM_MS;
+        });
     }
     function sweepFog() {
         if (!fogActive)
@@ -282,11 +396,15 @@ function createUndeadDirector(hooks) {
             return;
         going.forEach(u => { u.alive = false; });
         undeads = undeads.filter(u => u.alive);
+        // at dawn sweepGraveyards resets every plot itself
+        if (reason !== "dawn")
+            plotEmptied(going, false);
         hooks.emit("undead-cleared", { owners: going.map(u => u.owner), reason });
     }
     function die(u, killerId) {
         u.alive = false;
         undeads = undeads.filter(other => other.alive);
+        plotEmptied([u], true);
         hooks.emit("undead-died", { ownerId: u.owner, killerId });
     }
     // ── actions ──
@@ -299,7 +417,7 @@ function createUndeadDirector(hooks) {
         const target = hooks.getPlayer(u.targetId);
         if (!target?.pos || target.currentPlace?.placeId !== OPENWORLD.placeId)
             return;
-        if (Math.hypot(target.pos.x - u.x, target.pos.z - u.z) > HIT_RANGE)
+        if (Math.hypot(target.pos.x - u.x, target.pos.z - u.z) > u.hitRange)
             return;
         const dmgToApply = Math.round(dmg);
         hooks.emit("player-is-hit", {
@@ -496,6 +614,14 @@ function createUndeadDirector(hooks) {
             crumble([u], "target-gone");
             return;
         }
+        // a graveyard's dead let a target go once they're led too far from home
+        if (u.plot !== null) {
+            const home = graveyards_1.OPENWORLD_GRAVEYARDS[u.plot].position;
+            if (Math.hypot(target.pos.x - home.x, target.pos.z - home.z) > GRAVE_LEASH) {
+                crumble([u], "lost");
+                return;
+            }
+        }
         if (now < u.busyUntil)
             return;
         const tx = target.pos.x;
@@ -505,14 +631,15 @@ function createUndeadDirector(hooks) {
             u.nextDecisionAt = now + DECISION_MS;
             if (u.elite && tryHeal(u, now))
                 return;
-            if (tryJump(u, target, dist, now))
+            // a giant doesn't leap, dash or blink - it walks at you and swings
+            if (!u.giant && tryJump(u, target, dist, now))
                 return;
-            if (u.elite && tryDash(u, target, dist, now))
+            if (!u.giant && u.elite && tryDash(u, target, dist, now))
                 return;
-            if (u.elite && tryBlink(u, target, dist, now))
+            if (!u.giant && u.elite && tryBlink(u, target, dist, now))
                 return;
         }
-        if (dist <= MELEE_RANGE) {
+        if (dist <= u.meleeRange) {
             u.yaw = Math.atan2(tx - u.x, tz - u.z);
             if (now >= u.nextSwingAt) {
                 stopMoving(u);
@@ -532,7 +659,7 @@ function createUndeadDirector(hooks) {
             const gdx = gx - u.x;
             const gdz = gz - u.z;
             const gd = Math.hypot(gdx, gdz);
-            u.speed = u.elite && dist > RUN_FROM_DIST ? RUN_SPEED : exports.UNDEAD_SPEED;
+            u.speed = u.giant ? GIANT.speed : u.elite && dist > RUN_FROM_DIST ? RUN_SPEED : exports.UNDEAD_SPEED;
             if (gd > 0.05) {
                 const step = Math.min(u.speed * TICK_MS / 1000, gd);
                 u.x += gdx / gd * step;
@@ -567,6 +694,7 @@ function createUndeadDirector(hooks) {
             hooks.emit("undead-moves", { moves });
     }, TICK_MS);
     setInterval(sweepFog, FOG_SWEEP_MS);
+    setInterval(sweepGraveyards, GRAVE_SWEEP_MS);
     return {
         /** Every undead standing right now, in the shape the client builds bodies from. */
         list() {
@@ -582,7 +710,8 @@ function createUndeadDirector(hooks) {
             else if (weather !== "fog" && fogActive) {
                 fogActive = false;
                 sentAfter.clear();
-                crumble(undeads, "fog-lifted");
+                // the fog's own - the graveyards' keep till dawn
+                crumble(undeads.filter(u => u.plot === null), "fog-lifted");
             }
         },
         // a player swung (index.ts's "emitPlayerAttack") - any undead close in
@@ -594,7 +723,7 @@ function createUndeadDirector(hooks) {
             undeads.forEach(u => {
                 if (!u.alive || u.triumphing || now < u.busyUntil)
                     return;
-                if (Math.hypot(u.x - pos.x, u.z - pos.z) > REACT_RANGE)
+                if (Math.hypot(u.x - pos.x, u.z - pos.z) > REACT_RANGE * u.player.scale)
                     return;
                 if (dirTarg) {
                     const fx = dirTarg.x - pos.x;
@@ -602,7 +731,7 @@ function createUndeadDirector(hooks) {
                     if (fx * (u.x - pos.x) + fz * (u.z - pos.z) < 0)
                         return;
                 }
-                if (now >= u.nextDodgeAt && Math.random() < DODGE.chance)
+                if (!u.giant && now >= u.nextDodgeAt && Math.random() < DODGE.chance)
                     return dodge(u, pos, now);
                 if (now >= u.nextBlockAt && Math.random() < BLOCK.chance)
                     return block(u, pos, now);
@@ -620,6 +749,9 @@ function createUndeadDirector(hooks) {
             if (!u)
                 return true;
             const now = Date.now();
+            // still climbing out of the ground - out of reach, no "Miss" either
+            if (now < u.risingUntil)
+                return true;
             // rolled out of it - nothing lands
             if (now < u.invulnerableUntil) {
                 emitAction(u, "evade");

@@ -1,5 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.scaledExp = exports.ENEMY_EXP_SCALE = exports.scaledHp = exports.ENEMY_HP_SCALE = void 0;
 exports.generateSlimes = generateSlimes;
 exports.generateFireSlimes = generateFireSlimes;
 exports.generateElectricSlimes = generateElectricSlimes;
@@ -21,6 +22,7 @@ const tools_1 = require("../tools/tools");
 const coreDetails_1 = require("../recources/coreDetails");
 const castles_1 = require("../recources/castles");
 const witchTowers_1 = require("../recources/witchTowers");
+const safeZones_1 = require("../recources/safeZones");
 const meatLoots_1 = require("../recources/meatLoots");
 const enemyAttacks_1 = require("../recources/enemyAttacks");
 // clear ground kept around each openworld castle when placing enemies - see
@@ -170,6 +172,14 @@ const electricSlimeBase = {
 // already enemy-usable (lesserDemonBase above casts it too), so reused
 // as-is instead of inventing a new skill. elementType: "dark" resolves to
 // the purple/black palette added in client/src/enemies/skins.js.
+//
+// Its fury cutters (rangeAtkDetails below) open you up: every cutter that
+// lands leaves you bleeding - the standing wolves' bleed (client's
+// characterstate.js tickBleed: 2% of max hp a second, lethal, until a cure
+// lifts it), only certain rather than their claws' 25%. Its own copy rather
+// than standingWolfBase's bleedEffect - that one's declared further down,
+// after this object is already built.
+const cutterBleedEffect = { effectType: 'bleed', chance: 100, permanent: true, dn: 'Bleeding', spcost: 0, hpcost: 0, mpcost: 0, hungercost: 0, energycost: 0 };
 const darkSlimeBase = {
     ...slimeBase,
     name: "darkslime",
@@ -198,6 +208,16 @@ const darkSlimeBase = {
     // ducks a plain close-range swing (its "dock" clip) - this share of
     // them miss outright (createEnemy.js's atkCollider handler)
     dockChance: 0.8,
+    // a ranged attack beside its skill (client/src/enemies/rangeAttack.js):
+    // past melee reach it draws itself in, a glint flashes off it, lanes light
+    // up fanned out at its target, and it throws 2-3 crescents of its own dark
+    // liquid down them (models/projectiles/crescent.glb - effects/darkSlash.js),
+    // one after another. Every one that cuts you hits for its dmg and leaves
+    // you bleeding (effects, on top of its own melee effects - the client's
+    // landOnMe). Cut, you're shoved back and stagger (effects/slashed.js).
+    // color: purple or any "#rrggbb". Its sounds are made in code, darkCutS
+    // among them (effects/darkSlashSounds.js).
+    rangeAtkDetails: { range: 15, modelName: false, projectileDet: { pType: "darkslash", color: "purple", slashes: [2, 3] }, soundWhenHit: "darkCutS", victimAnimation: "hit_struct1", effects: [cutterBleedEffect] },
     loots: [coreDetails_1.darkslimeCoreLoot],
     expToGain: 2000,
 };
@@ -909,6 +929,24 @@ function scatterPosition(areaType, half, minRadius, maxRadius) {
 }
 // keepOut (optional): a spot it returns true for is rolled again, like the
 // castles' - how the dark slimes stay away from the witch towers
+// Every enemy's hp is its template's (the bases above) times this, as it's made.
+// The templates were tuned when a player's weapon blow counted the weapon stat
+// x10 - each Strength point was +100 a swing; it counts x1.15 now (the client's
+// constants.js WEAPON_STAT_DMG), so a mid-level character hits about a fifth
+// as hard, and every enemy has a fifth of its old hp: a swing takes as many
+// swings as it did. Spells were never part of that scale (a flat 70-260 or so),
+// so they now count for something against them. Change it here, not in each base.
+exports.ENEMY_HP_SCALE = 0.2;
+const scaledHp = (hp) => Math.max(1, Math.round(hp * exports.ENEMY_HP_SCALE));
+exports.scaledHp = scaledHp;
+// And the exp each one gives, as it's made. A water slime's 50 becomes 18, so
+// the client's level curve (characterstate.js's expToNextLevel - 100 to reach
+// level 2, 2,000 for level 3) means about six slimes for level 2 and about a
+// hundred more for level 3. Every enemy scales together, so the climb can't be
+// skipped by killing a few of a richer kind instead.
+exports.ENEMY_EXP_SCALE = 0.36;
+const scaledExp = (exp) => Math.max(1, Math.round(exp * exports.ENEMY_EXP_SCALE));
+exports.scaledExp = scaledExp;
 function generateEnemies(base, total, placeId, areaSize, areaType, centerX, centerZ, minRadius, maxRadius, keepOut) {
     const half = areaSize / 2;
     const enemies = [];
@@ -924,14 +962,22 @@ function generateEnemies(base, total, placeId, areaSize, areaType, centerX, cent
         // all an enemy ever strays from its spawn on its own, so wandering
         // never walks one into a castle wall either. "fixed" spawns are
         // placed on purpose and left alone.
-        for (let tries = 0; placeId === 888 && areaType !== "fixed" && ((0, castles_1.isNearCastle)(x, z, CASTLE_SPAWN_MARGIN) || keepOut?.(x, z)) && tries < 20; tries++) {
+        // A safe zone (safeZones.ts - the Leadale guard post) is kept clear
+        // the same way, in any place.
+        const rollAgain = () => (placeId === 888 && ((0, castles_1.isNearCastle)(x, z, CASTLE_SPAWN_MARGIN) || keepOut?.(x, z))) || (0, safeZones_1.isInSafeSpawnZone)(placeId, x, z);
+        for (let tries = 0; areaType !== "fixed" && rollAgain() && tries < 20; tries++) {
             const again = scatterPosition(areaType, half, minRadius, maxRadius);
             x = again.x + centerX;
             z = again.z + centerZ;
         }
         const y = 0;
+        const template = base;
         enemies.push({
             ...base,
+            // the template's hp, scaled (ENEMY_HP_SCALE above)
+            ...(template.maxHp != null ? { hp: (0, exports.scaledHp)(template.hp ?? template.maxHp), maxHp: (0, exports.scaledHp)(template.maxHp) } : {}),
+            // and its exp (ENEMY_EXP_SCALE above)
+            ...(template.expToGain != null ? { expToGain: (0, exports.scaledExp)(template.expToGain) } : {}),
             _id: `${(0, tools_1.randNumString)()}`,
             currentPlaceId: placeId,
             x,
