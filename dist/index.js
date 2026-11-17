@@ -68,6 +68,7 @@ const faker_1 = require("@faker-js/faker");
 const castles_1 = require("./recources/castles");
 const witchTowers_1 = require("./recources/witchTowers");
 const safeZones_1 = require("./recources/safeZones");
+const pvp_1 = require("./recources/pvp");
 const admin_1 = require("./admin");
 exports.enemyLengthsInPlace = [
     {
@@ -179,6 +180,14 @@ const io = new socket_io_1.Server(server, {
 // for the backstop covering deferred callbacks (e.g. respawnEnemy's setTimeout).
 function safeOn(socket, event, handler) {
     socket.on(event, (...args) => {
+        // ONE SESSION PER ACCOUNT: once a newer login has taken this account over (join-world below), whatever
+        // the older connection still sends - a tab that ignored the kick, a tampered client - is dropped
+        const owner = socket.data?.owner;
+        if (owner && event !== "join-world") {
+            const current = players.find(p => p.owner === owner);
+            if (current && current.socketId !== socket.id)
+                return;
+        }
         try {
             handler(...args);
         }
@@ -411,9 +420,14 @@ function releaseEnemiesTargeting(deadOwnerId) {
 const SAFE_ZONE_SLACK = 6;
 function isPlayerInSafeZone(owner) {
     const pl = players.find(p => p.owner === owner);
-    if (!pl?.pos || !pl.currentPlace)
+    return !!pl && isSafe(pl);
+}
+// the player's own insideSafezone, held only while it's believable: same place, still on that zone's grounds
+function isSafe(pl) {
+    const zone = pl.insideSafezone;
+    if (!zone || !pl.pos || !pl.currentPlace || pl.currentPlace.placeId !== zone.placeId)
         return false;
-    return (0, safeZones_1.isInSafeZoneBox)(pl.currentPlace.placeId, pl.pos.x, pl.pos.z, SAFE_ZONE_SLACK);
+    return (0, safeZones_1.isPlausiblySafe)(zone.name, zone.placeId, pl.pos.x, pl.pos.z, SAFE_ZONE_SLACK);
 }
 // Physical damage after the target's worn armour, for any target id.
 //
@@ -498,10 +512,14 @@ const undead = (0, undead_1.createUndeadDirector)({
     getPlayer: owner => players.find(pl => pl.owner === owner && isRealPlayer(pl)),
     // not anyone at the Leadale guard post (safeZones.ts) - the fog's dead
     // aren't sent after them there
-    openworldPlayers: () => players.filter(pl => isRealPlayer(pl) && pl.currentPlace?.placeId === 888 && pl.pos && !(0, safeZones_1.isInSafeZoneBox)(888, pl.pos.x, pl.pos.z, SAFE_ZONE_SLACK)),
+    openworldPlayers: () => players.filter(pl => isRealPlayer(pl) && pl.currentPlace?.placeId === 888 && pl.pos && !isSafe(pl)),
     isNight: dayNight_1.isNightTime,
 });
+// duels and parties (recources/pvp.ts) - who is who comes from the live players list
+(0, pvp_1.setupPvp)(io, () => players);
 io.on("connection", (socket) => {
+    // duels and parties between players (recources/pvp.ts)
+    (0, pvp_1.registerPvpSocket)(socket, safeOn);
     safeOn(socket, "join-world", (data, callback) => {
         // join-world fires every time the client loads a new place, not just
         // on first connect (see areascene.js) - so an existing entry for this
@@ -512,8 +530,13 @@ io.on("connection", (socket) => {
         // and this player also drops out of `players`, so the server can no
         // longer find them to echo back their own attacks either).
         const alreadyJoined = players.find(user => user.owner === data.owner);
+        socket.data.owner = data.owner;
         if (alreadyJoined && alreadyJoined.socketId !== socket.id) {
-            socket.to(alreadyJoined.socketId).emit("duplicate-login", { message: "You have logged in from another device." });
+            // the account is already in the game on another tab or computer: the NEW login wins. The older one is
+            // told why (client/src/sockets/sessionGuard.js shows it and stops it saving) and then cut off
+            const stale = alreadyJoined.socketId;
+            socket.to(stale).emit("duplicate-login", { message: "You have logged in from another device." });
+            setTimeout(() => io.sockets.sockets.get(stale)?.disconnect(true), 400);
         }
         // leaving a place mid-sit - free the seat for whoever's still there
         if (alreadyJoined?.seat)
@@ -589,6 +612,8 @@ io.on("connection", (socket) => {
         // they are not in `players`, so the snapshot above never carries them
         if (data.currentPlace?.placeId === 888)
             socket.emit("undead-spawned", { undeads: undead.list() });
+        // walked out of a duel's arena mid-fight - it's lost (recources/pvp.ts)
+        (0, pvp_1.pvpOnPlace)(data.owner, data.currentPlace?.placeId);
     });
     // client's inputMovement.js "v" debug key - flips the module-level
     // spawnBotsEnabled flag the BOT PLAYERS block's own setInterval (further
@@ -1108,6 +1133,9 @@ io.on("connection", (socket) => {
     // "enemy-attacked" already works for enemy-dealt damage, just reusing
     // this new event name instead of pretending an enemy attacked them.
     safeOn(socket, "playerIsHit", data => {
+        // party members can't hurt each other (recources/pvp.ts)
+        if ((0, pvp_1.isPartyMates)(data?.playerId, data?.targetId))
+            return;
         const rawDmg = data.dmgDetails.weaponDmg ? data.dmgDetails.weaponDmg : data.dmgDetails.physicalDmg;
         // a blow on one of the undead (recources/undead.ts) - it takes it from
         // there, dodges and blocks included, and broadcasts the result itself
@@ -1477,15 +1505,22 @@ io.on("connection", (socket) => {
     // stepped into a safe zone's box (client tools/safeZones.js) - every
     // enemy after them lets them go, and the fog's dead give up on them
     safeOn(socket, "enter-safe-zone", data => {
-        const { ownerId, placeId, pos } = data ?? {};
+        const { ownerId, placeId, pos, zone } = data ?? {};
         const player = players.find(user => user.owner === ownerId);
-        if (!player || !pos)
+        if (!player || !pos || typeof zone !== "string")
             return;
-        if (!(0, safeZones_1.isInSafeZoneBox)(placeId, pos.x, pos.z, SAFE_ZONE_SLACK))
+        if (!(0, safeZones_1.isPlausiblySafe)(zone, placeId, pos.x, pos.z, SAFE_ZONE_SLACK))
             return;
         player.pos = { ...(player.pos ?? {}), ...pos };
+        player.insideSafezone = { name: zone, placeId };
         releaseEnemiesTargeting(ownerId);
         undead.onPlayerGone(ownerId, "left");
+    });
+    // walked back out of it
+    safeOn(socket, "leave-safe-zone", data => {
+        const player = players.find(user => user.owner === data?.ownerId);
+        if (player)
+            player.insideSafezone = null;
     });
     safeOn(socket, "enemyWillChase", data => {
         const { currentPlaceId, _id, targetId, actionType } = data;
@@ -1533,6 +1568,8 @@ io.on("connection", (socket) => {
         if (thePlayer) {
             // whatever they were in the middle of picking up is free again
             (0, pickupClaims_1.releaseClaimsOf)(thePlayer.owner);
+            // a duel they were in is lost; they leave their party
+            (0, pvp_1.pvpOnDisconnect)(thePlayer.owner);
             removeCharacter(thePlayer.owner, thePlayer.name, thePlayer.currentPlace.placeId);
         }
     });
@@ -3036,7 +3073,9 @@ setInterval(() => {
         const wolf = tcpEnemies.find(enem => isStandingWolf(enem) && enem.name === wolfName);
         const prey = players.find(pl => pl.owner === owner);
         const stillOn = wolf && wolf._targetId === owner
-            && prey?.pos && prey.currentPlace?.placeId === 888 && distFromStart(prey.pos) >= HUNT_GIVE_UP_DIST;
+            && prey?.pos && prey.currentPlace?.placeId === 888 && distFromStart(prey.pos) >= HUNT_GIVE_UP_DIST
+            // safe inside a castle's walls (or at the guard post) - the hunt is called off
+            && !isPlayerInSafeZone(owner);
         if (stillOn)
             return;
         hunts.delete(wolfName);
@@ -3050,6 +3089,8 @@ setInterval(() => {
         if (bots.some(b => b.player.owner === pl.owner))
             return;
         if (distFromStart(pl.pos) < HUNT_START_DIST)
+            return;
+        if (isPlayerInSafeZone(pl.owner))
             return;
         if ([...hunts.values()].includes(pl.owner))
             return;
@@ -3079,8 +3120,8 @@ setInterval(() => {
             return;
         if (isPlayerResting(player))
             return;
-        // at the guard post (safeZones.ts) - nothing's dropped beside them
-        if ((0, safeZones_1.isInSafeSpawnZone)(888, player.pos.x, player.pos.z))
+        // inside a safe zone (the post, a castle's walls) or on its grounds - nothing's dropped round them
+        if (isSafe(player) || (0, safeZones_1.isInSafeSpawnZone)(888, player.pos.x, player.pos.z))
             return;
         const { center, minDist, maxDist } = enemyDetails_1.OPENWORLD_SLIME_TERRITORY;
         const distFromCenter = Math.hypot(player.pos.x - center.x, player.pos.z - center.z);
