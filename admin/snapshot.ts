@@ -3,6 +3,8 @@ import { getWeatherState } from "../recources/weather"
 import { getDayNightState } from "../recources/dayNight"
 import { placeById } from "./catalog"
 import { store } from "./persistence"
+import { watchSummary } from "./watch"
+import { purseOf, getSettings as economySettings } from "./economy"
 
 // The state the admin page keeps on screen: a summary of the world and the
 // roster of who's in it, sent every couple of seconds while someone is looking.
@@ -35,7 +37,7 @@ export function buildSnapshot(world: AdminWorld, adminCount: number) {
         owner: pl.owner,
         name: pl.name,
         lvl: pl.lvl,
-        gender: pl.gender,
+        vessel: pl.vessel ?? (pl.gender === "female" ? "doll" : "puppet"),
         bot: botOwners.has(pl.owner),
         placeId: pl.currentPlace?.placeId ?? null,
         place: pl.currentPlace?.name ?? placeById(pl.currentPlace?.placeId)?.name ?? "?",
@@ -46,6 +48,9 @@ export function buildSnapshot(world: AdminWorld, adminCount: number) {
         maxHp: pl.maxHp ?? null,
         tired: !!pl.isTired,
         bleeding: !!pl.isBleeding,
+        // what the master control's Watch tab knows: the login check, flags, earnings (watch.ts, economy.ts)
+        watch: watchSummary(pl.owner),
+        purse: purseOf(pl.owner),
     }))
 
     return {
@@ -79,6 +84,7 @@ export function buildSnapshot(world: AdminWorld, adminCount: number) {
             hunts: [...world.hunts].map(([wolf, owner]) => ({ wolf, owner, prey: world.players.find(pl => pl.owner === owner)?.name ?? null })),
         },
         persistence: store.info(),
+        economy: economySettings(),
         players,
     }
 }

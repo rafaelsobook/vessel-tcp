@@ -10,6 +10,8 @@ import { setWeather, getWeatherState, WEATHER_TYPES } from "../recources/weather
 import { setTimeOfDay, getDayNightState } from "../recources/dayNight"
 import { ground, scatter, homeRoomFor, round2 } from "./geo"
 import { store, requestRest, restConfigured, Overlay } from "./persistence"
+import { watchDetail, watchList, noteTeleport, clearFlags } from "./watch"
+import { getSettings as economySettings, saveSettings as saveEconomy, setStanding, purseOf, economyStatus, flush as flushEconomy, clearAccountFlags, SLIME_KINDS } from "./economy"
 
 // Everything an admin can do, one function each. A command gets the live world
 // and the socket server (see types.ts) and a payload that came off the wire, so
@@ -318,6 +320,8 @@ function removePickups(ctx: AdminContext, kind: PickupKind, match: (item: any) =
 // same place or another one.
 function teleportPlayer(ctx: AdminContext, p: any) {
     const player = onlinePlayer(ctx, p.owner)
+    // the jump that follows is expected - no speed flag for it (watch.ts)
+    noteTeleport(player.owner)
     const current = player.currentPlace.placeId
     const payload: any = {}
 
@@ -438,6 +442,145 @@ function mapOf(ctx: AdminContext, p: any) {
     }
 }
 
+// ── watching players (watch.ts) ──────────────────────────────────────────────
+const ownerArg = (value: unknown) => text(value, "player", 80)
+const WATCH_RADIUS = 60
+
+function watchGet(ctx: AdminContext, p: any) {
+    const owner = ownerArg(p.owner)
+    const since = Number.isFinite(Number(p.since)) ? Number(p.since) : 0
+    const detail = watchDetail(owner, since)
+    if (!detail) return fail("nothing seen of that player yet")
+    const live = ctx.world.players.find(pl => pl.owner === owner)
+    const placeId = live?.currentPlace?.placeId ?? detail.placeId
+    const pos = live?.pos
+    const near = (x: number, z: number) => !!pos && Number.isFinite(x) && Number.isFinite(z) && Math.hypot(x - pos.x, z - pos.z) <= WATCH_RADIUS
+    return {
+        ...detail,
+        live: live ? {
+            name: live.name, lvl: live.lvl ?? null, placeId, place: live.currentPlace?.name ?? placeById(placeId)?.name ?? "?",
+            pos: pos ? { x: round2(pos.x), z: round2(pos.z) } : null, mode: live.mode ?? null,
+            hp: live.hp ?? null, maxHp: live.maxHp ?? null, vessel: live.vessel ?? null,
+        } : null,
+        purse: purseOf(owner),
+        nearby: pos ? {
+            enemies: ctx.world.enemies.filter(e => e.currentPlaceId === placeId && near(e.x, e.z)).slice(0, 200)
+                .map(e => ({ x: round2(e.x), z: round2(e.z), name: e.dn ?? e.name, hp: Math.round(e.hp), maxHp: e.maxHp, targetingThem: e._targetId === owner })),
+            players: ctx.world.players.filter(pl => pl.owner !== owner && pl.currentPlace?.placeId === placeId && pl.pos && near(pl.pos.x, pl.pos.z))
+                .map(pl => ({ x: round2(pl.pos.x), z: round2(pl.pos.z), name: pl.name, bot: isBot(ctx, pl.owner) })),
+        } : { enemies: [], players: [] },
+    }
+}
+
+// this session's flags and the ones kept on the account - the payout record check passes again
+async function clearWatchFlags(ctx: AdminContext, p: any) {
+    const owner = ownerArg(p.owner)
+    const seen = clearFlags(owner)
+    if (/^[a-f0-9]{24}$/i.test(owner)) {
+        await callRest("POST", `/admin/users/${owner}/flags/clear`, {})
+        clearAccountFlags(owner)
+    } else if (!seen) return fail("nothing seen of that player yet")
+    return { owner, name: ctx.world.players.find(pl => pl.owner === owner)?.name ?? owner }
+}
+
+// ── VesselPay (economy.ts, and the REST server's wallets and withdrawals) ─────
+// a player's account id - bots and the undead have none
+const accountId = (value: unknown) => {
+    const id = text(value, "account", 40)
+    return /^[a-f0-9]{24}$/i.test(id) ? id : fail("that isn't a player account (bots and the undead have none)")
+}
+const requestId = (value: unknown) => {
+    const id = text(value, "request", 40)
+    return /^[a-f0-9]{24}$/i.test(id) ? id : fail("that isn't a request id")
+}
+const cad = (cents: number) => `CA$${(Number(cents || 0) / 100).toFixed(2)}`
+
+function tellPlayer(ctx: AdminContext, owner: string, event: string, data: any) {
+    const player = ctx.world.players.find(pl => pl.owner === owner)
+    if (player?.socketId) ctx.io.to(player.socketId).emit(event, data)
+    return player
+}
+
+async function economyGet() {
+    let stats: any = null
+    try { stats = await callRest("GET", "/admin/payout-stats") } catch (error: any) { stats = { error: error.message } }
+    return { ...economyStatus(), stats }
+}
+
+async function economySet(ctx: AdminContext, p: any) {
+    const given = p.settings && typeof p.settings === "object" ? p.settings : {}
+    const next: any = {}
+    if (given.enabled !== undefined) next.enabled = flag(given.enabled)
+    if (given.payChance !== undefined) next.payChance = num(given.payChance, "chance a slime pays", 0, 1)
+    if (given.slimePay && typeof given.slimePay === "object") {
+        next.slimePay = {}
+        for (const kind of SLIME_KINDS) if (given.slimePay[kind] !== undefined) next.slimePay[kind] = int(given.slimePay[kind], `${kind} pay (cents)`, 0, 10000)
+    }
+    if (given.dailyCapCents !== undefined) next.dailyCapCents = int(given.dailyCapCents, "daily cap (cents)", 0, 100000)
+    if (given.maxHitFlag !== undefined) next.maxHitFlag = int(given.maxHitFlag, "huge-hit flag", 100, 10_000_000)
+    if (!restConfigured()) return fail("the REST server isn't set up for the admin (ADMIN_PERSIST is off)")
+    try {
+        return { settings: await saveEconomy(next) }
+    } catch (error: any) {
+        return fail(`REST server: ${error?.message ?? error}`)
+    }
+}
+
+async function payoutsList(ctx: AdminContext, p: any) {
+    const status = ["pending", "paid", "rejected", "all"].includes(p.status) ? p.status : "pending"
+    // what's owed from kills goes first, so the balances shown are current
+    await flushEconomy().catch(() => {})
+    return callRest("GET", `/admin/withdrawals?status=${status}&limit=100`)
+}
+
+async function payoutPaid(ctx: AdminContext, p: any) {
+    const id = requestId(p.id)
+    const txnId = text(p.txnId, "PayPal transaction id", 80)
+    const note = p.note ? text(p.note, "note", 500) : ""
+    const res = await callRest("POST", `/admin/withdrawals/${id}/paid`, { txnId, note, by: ctx.ip })
+    const w = res.withdrawal
+    tellPlayer(ctx, w.owner, "payout-decided", { status: "paid", amountCents: w.amountCents })
+    return { id, username: w.username, amountCents: w.amountCents }
+}
+
+async function payoutReject(ctx: AdminContext, p: any) {
+    const id = requestId(p.id)
+    const reason = text(p.reason, "reason", 300)
+    const refund = !(p.refund === false || p.refund === "false")
+    const res = await callRest("POST", `/admin/withdrawals/${id}/reject`, { reason, refund, note: p.note ? text(p.note, "note", 500) : "", by: ctx.ip })
+    const w = res.withdrawal
+    tellPlayer(ctx, w.owner, "payout-decided", { status: "rejected", refunded: refund, reason, amountCents: w.amountCents })
+    return { id, username: w.username, amountCents: w.amountCents, refunded: refund }
+}
+
+// ── accounts ─────────────────────────────────────────────────────────────────
+async function accountGet(ctx: AdminContext, p: any) {
+    return callRest("GET", `/admin/users/${accountId(p.owner)}`)
+}
+
+async function accountBan(ctx: AdminContext, p: any) {
+    const owner = accountId(p.owner)
+    const banned = !(p.banned === false || p.banned === "false")
+    const reason = banned ? text(p.reason, "reason", 300) : ""
+    const res = await callRest("POST", `/admin/users/${owner}/ban`, { banned, reason })
+    setStanding(owner, { banned })
+    if (banned) {
+        const player = tellPlayer(ctx, owner, "account-banned", { reason })
+        if (player?.socketId) setTimeout(() => ctx.io.sockets.sockets.get(player.socketId)?.disconnect(true), 400)
+    }
+    return { owner, username: res.username, banned }
+}
+
+async function accountFreeze(ctx: AdminContext, p: any) {
+    const owner = accountId(p.owner)
+    const frozen = !(p.frozen === false || p.frozen === "false")
+    const reason = frozen ? text(p.reason, "reason", 300) : ""
+    const res = await callRest("POST", `/admin/users/${owner}/freeze`, { frozen, reason })
+    setStanding(owner, { frozen })
+    tellPlayer(ctx, owner, "wallet-frozen", { frozen, reason })
+    return { owner, username: res.username, frozen }
+}
+
 // ── the registry ─────────────────────────────────────────────────────────────
 export const COMMANDS: Record<string, Command> = {
     // what the page can pick from
@@ -539,6 +682,28 @@ export const COMMANDS: Record<string, Command> = {
 
     "persist.retry": { audit: true, run: () => { store.retry(); return { status: store.status } }, describe: () => "retrying the load" },
     "persist.flush": { audit: true, run: async () => { await store.flush(); return { status: store.status } }, describe: () => "save now" },
+
+    // watching players
+    "watch.list": { audit: false, run: () => ({ players: watchList() }) },
+    "watch.get": { audit: false, run: watchGet },
+    "watch.clearFlags": { audit: true, run: clearWatchFlags, describe: (p, r) => `${r.name}` },
+
+    // VesselPay
+    "economy.get": { audit: false, run: economyGet },
+    "economy.set": { audit: true, run: economySet, describe: (p, r) => {
+        const st = r.settings
+        const pay = SLIME_KINDS.map(kind => `${kind.replace("slime", "")} ${st.slimePay?.[kind] ?? 0}c`).join("/")
+        return `${st.enabled ? "on" : "OFF"}, ${Math.round(st.payChance * 100)}% chance, ${pay}, cap ${cad(st.dailyCapCents)}/day, huge-hit ${st.maxHitFlag}`
+    } },
+    "payouts.list": { audit: false, run: payoutsList },
+    "payouts.paid": { audit: true, run: payoutPaid, describe: (p, r) => `${r.username} ${cad(r.amountCents)} - PayPal txn ${String(p.txnId).slice(0, 40)}` },
+    "payouts.reject": { audit: true, run: payoutReject, describe: (p, r) => `${r.username} ${cad(r.amountCents)} ${r.refunded ? "refunded" : "VOIDED"}: ${String(p.reason).slice(0, 80)}` },
+
+    // accounts
+    "accounts.get": { audit: false, run: accountGet },
+    "accounts.ban": { audit: true, run: accountBan, describe: (p, r) => `${r.username} ${r.banned ? "BANNED" : "unbanned"}${p.reason ? ": " + String(p.reason).slice(0, 80) : ""}` },
+    "accounts.freeze": { audit: true, run: accountFreeze, describe: (p, r) => `${r.username} ${r.frozen ? "frozen" : "unfrozen"}${p.reason ? ": " + String(p.reason).slice(0, 80) : ""}` },
+    "accounts.banned": { audit: false, run: () => callRest("GET", "/admin/banned") },
 }
 
 // ── bringing saved placements back ───────────────────────────────────────────

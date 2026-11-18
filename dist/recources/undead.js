@@ -237,7 +237,9 @@ function createUndeadDirector(hooks) {
             socketId: `undead-socket-${owner}`,
             name: giant ? (night ? "Nightrisen Colossus" : "Risen Colossus") : night ? "Nightrisen" : "Risen",
             lvl,
-            gender: "male",
+            // the bones are the body (client/src/charactersystem/vessels.js) -
+            // race "undead" is what makes it one of the fog's dead
+            vessel: "skeleton",
             race: "undead",
             currentPlace: OPENWORLD,
             currentPlaceId: OPENWORLD.placeId,
@@ -405,7 +407,8 @@ function createUndeadDirector(hooks) {
         u.alive = false;
         undeads = undeads.filter(other => other.alive);
         plotEmptied([u], true);
-        hooks.emit("undead-died", { ownerId: u.owner, killerId });
+        // maxHp and name ride along for the killer's VesselPay payout (admin/economy.ts)
+        hooks.emit("undead-died", { ownerId: u.owner, killerId, maxHp: u.maxHp, name: u.player?.name ?? (u.giant ? "Grave Giant" : "Undead") });
     }
     // ── actions ──
     function emitAction(u, kind, extra = {}) {

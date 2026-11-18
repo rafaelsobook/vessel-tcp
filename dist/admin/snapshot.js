@@ -5,6 +5,8 @@ const weather_1 = require("../recources/weather");
 const dayNight_1 = require("../recources/dayNight");
 const catalog_1 = require("./catalog");
 const persistence_1 = require("./persistence");
+const watch_1 = require("./watch");
+const economy_1 = require("./economy");
 // The state the admin page keeps on screen: a summary of the world and the
 // roster of who's in it, sent every couple of seconds while someone is looking.
 // Lists with more rows than that (all the enemies, say) are fetched on request
@@ -32,7 +34,7 @@ function buildSnapshot(world, adminCount) {
         owner: pl.owner,
         name: pl.name,
         lvl: pl.lvl,
-        gender: pl.gender,
+        vessel: pl.vessel ?? (pl.gender === "female" ? "doll" : "puppet"),
         bot: botOwners.has(pl.owner),
         placeId: pl.currentPlace?.placeId ?? null,
         place: pl.currentPlace?.name ?? (0, catalog_1.placeById)(pl.currentPlace?.placeId)?.name ?? "?",
@@ -43,6 +45,9 @@ function buildSnapshot(world, adminCount) {
         maxHp: pl.maxHp ?? null,
         tired: !!pl.isTired,
         bleeding: !!pl.isBleeding,
+        // what the master control's Watch tab knows: the login check, flags, earnings (watch.ts, economy.ts)
+        watch: (0, watch_1.watchSummary)(pl.owner),
+        purse: (0, economy_1.purseOf)(pl.owner),
     }));
     return {
         t: Date.now(),
@@ -75,6 +80,7 @@ function buildSnapshot(world, adminCount) {
             hunts: [...world.hunts].map(([wolf, owner]) => ({ wolf, owner, prey: world.players.find(pl => pl.owner === owner)?.name ?? null })),
         },
         persistence: persistence_1.store.info(),
+        economy: (0, economy_1.getSettings)(),
         players,
     };
 }

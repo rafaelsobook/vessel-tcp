@@ -6,6 +6,8 @@ import { create as createItems } from "./views/items.js"
 import { create as createMap } from "./views/map.js"
 import { create as createServer } from "./views/server.js"
 import { create as createLogs } from "./views/logs.js"
+import { create as createWatch } from "./views/watch.js"
+import { create as createPayouts } from "./views/payouts.js"
 
 // The page's core: signing in, the socket to the server's /admin namespace,
 // the tabs, and what every view shares (`app`). Each view lives in views/ and
@@ -83,7 +85,7 @@ function showTab(id) {
 }
 
 function buildViews() {
-    app.views = [createDashboard, createPlayers, createEnemies, createItems, createMap, createServer, createLogs].map(make => make(app))
+    app.views = [createDashboard, createPlayers, createWatch, createPayouts, createEnemies, createItems, createMap, createServer, createLogs].map(make => make(app))
     const tabs = clear($("tabs"))
     const views = clear($("views"))
     app.views.forEach(view => {

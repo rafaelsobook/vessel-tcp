@@ -40,8 +40,16 @@ export function create(app) {
         clear(body)
         if (!rows.length) return body.append(emptyRow(7, players.length ? "Nothing matches the filter" : "Nobody is in the world"))
         rows.forEach(player => {
+            const watch = player.watch
             const status = [
                 player.bot ? chip("bot", "gold") : null,
+                // the login check and the anti-cheat flags (tcp's admin/watch.ts)
+                !player.bot && watch?.session === "valid" ? chip("login checked", "good") : null,
+                !player.bot && watch?.session === "missing" ? chip("no login token", "warn") : null,
+                !player.bot && watch?.session === "invalid" ? chip("bad login", "bad") : null,
+                watch?.isGuest ? chip("guest") : null,
+                watch?.flags ? chip(`${watch.flags} flag${watch.flags > 1 ? "s" : ""}`, watch.worst === "bad" ? "bad" : "warn") : null,
+                player.purse?.frozen ? chip("frozen", "warn") : null,
                 player.seated ? chip("sitting") : null,
                 player.tired ? chip("tired", "warn") : null,
                 player.bleeding ? chip("bleeding", "bad") : null,
@@ -49,6 +57,7 @@ export function create(app) {
             const actions = player.bot
                 ? el("td", { class: "actions muted", text: "" })
                 : el("td", { class: "actions" },
+                    button("Watch", null, { small: true, title: "What they're doing, live - and their anti-cheat flags" }),
                     button("Lift", null, { small: true, title: "Raise 4 units straight up - for someone stuck in a wall or the ground" }),
                     button("Move...", null, { small: true }),
                     button("Message", null, { small: true }),
@@ -72,6 +81,7 @@ export function create(app) {
         if (!btn) return
         const player = playerOf(btn.dataset.owner)
         if (!player) return toast("That player has left", "fail")
+        if (btn.dataset.act === "watch") return app.goto("watch", { owner: player.owner })
         if (btn.dataset.act === "lift") app.run("players.teleport", { owner: player.owner, lift: 4 }, `${player.name} lifted`)
         if (btn.dataset.act === "move") openMove(player)
         if (btn.dataset.act === "message") openMessage(player)

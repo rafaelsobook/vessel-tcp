@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.store = exports.restConfigured = void 0;
+exports.store = exports.restConfigured = exports.worldName = void 0;
 exports.requestRest = requestRest;
 const auth_1 = require("./auth");
 const emptyOverlay = () => ({ enemies: [], treasures: [], grains: [], mushrooms: [], ores: [] });
@@ -11,6 +11,9 @@ const API_URL = (process.env.API_URL
     ?? (process.env.RENDER ? "https://vessel-serv.onrender.com" : "http://localhost:8100")).replace(/\/+$/, "");
 // each environment keeps its own document, in case they share a database
 const WORLD_NAME = process.env.ADMIN_WORLD_NAME ?? (process.env.RENDER ? "production" : "dev");
+// the economy's settings are kept per environment too (economy.ts)
+const worldName = () => WORLD_NAME;
+exports.worldName = worldName;
 const ENABLED = process.env.ADMIN_PERSIST !== "off";
 // a cold REST server (a free host waking up) can take most of a minute
 const LOAD_TIMEOUT_MS = 70000;

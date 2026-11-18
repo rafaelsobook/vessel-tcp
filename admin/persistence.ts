@@ -34,6 +34,8 @@ const API_URL = (process.env.API_URL
     ?? (process.env.RENDER ? "https://vessel-serv.onrender.com" : "http://localhost:8100")).replace(/\/+$/, "")
 // each environment keeps its own document, in case they share a database
 const WORLD_NAME = process.env.ADMIN_WORLD_NAME ?? (process.env.RENDER ? "production" : "dev")
+// the economy's settings are kept per environment too (economy.ts)
+export const worldName = () => WORLD_NAME
 const ENABLED = process.env.ADMIN_PERSIST !== "off"
 
 // a cold REST server (a free host waking up) can take most of a minute

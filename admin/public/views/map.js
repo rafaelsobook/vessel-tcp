@@ -336,5 +336,15 @@ export function create(app) {
             timer = setInterval(refresh, REFRESH_MS)
         },
         onHide() { clearInterval(timer) },
+        // the Watch tab's "Show on map": that place, centred on them, close in
+        onGoto(detail) {
+            if (detail?.placeId == null || !app.placeById(detail.placeId)) return
+            placeSel.value = String(detail.placeId)
+            requestAnimationFrame(() => {
+                resetView()
+                if (app.pick) { centre = { x: app.pick.x, z: app.pick.z }; scale = Math.max(scale, 6); renderPick() }
+                refresh()
+            })
+        },
     }
 }

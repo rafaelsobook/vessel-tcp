@@ -14,6 +14,8 @@ const weather_1 = require("../recources/weather");
 const dayNight_1 = require("../recources/dayNight");
 const geo_1 = require("./geo");
 const persistence_1 = require("./persistence");
+const watch_1 = require("./watch");
+const economy_1 = require("./economy");
 // ── limits and validation ────────────────────────────────────────────────────
 const MAX_SPAWN = 100; // enemies in one command
 const MAX_CHESTS = 20;
@@ -311,6 +313,8 @@ function removePickups(ctx, kind, match) {
 // same place or another one.
 function teleportPlayer(ctx, p) {
     const player = onlinePlayer(ctx, p.owner);
+    // the jump that follows is expected - no speed flag for it (watch.ts)
+    (0, watch_1.noteTeleport)(player.owner);
     const current = player.currentPlace.placeId;
     const payload = {};
     if (p.lift != null) {
@@ -427,6 +431,150 @@ function mapOf(ctx, p) {
         ],
     };
 }
+// ── watching players (watch.ts) ──────────────────────────────────────────────
+const ownerArg = (value) => text(value, "player", 80);
+const WATCH_RADIUS = 60;
+function watchGet(ctx, p) {
+    const owner = ownerArg(p.owner);
+    const since = Number.isFinite(Number(p.since)) ? Number(p.since) : 0;
+    const detail = (0, watch_1.watchDetail)(owner, since);
+    if (!detail)
+        return (0, types_1.fail)("nothing seen of that player yet");
+    const live = ctx.world.players.find(pl => pl.owner === owner);
+    const placeId = live?.currentPlace?.placeId ?? detail.placeId;
+    const pos = live?.pos;
+    const near = (x, z) => !!pos && Number.isFinite(x) && Number.isFinite(z) && Math.hypot(x - pos.x, z - pos.z) <= WATCH_RADIUS;
+    return {
+        ...detail,
+        live: live ? {
+            name: live.name, lvl: live.lvl ?? null, placeId, place: live.currentPlace?.name ?? (0, catalog_1.placeById)(placeId)?.name ?? "?",
+            pos: pos ? { x: (0, geo_1.round2)(pos.x), z: (0, geo_1.round2)(pos.z) } : null, mode: live.mode ?? null,
+            hp: live.hp ?? null, maxHp: live.maxHp ?? null, vessel: live.vessel ?? null,
+        } : null,
+        purse: (0, economy_1.purseOf)(owner),
+        nearby: pos ? {
+            enemies: ctx.world.enemies.filter(e => e.currentPlaceId === placeId && near(e.x, e.z)).slice(0, 200)
+                .map(e => ({ x: (0, geo_1.round2)(e.x), z: (0, geo_1.round2)(e.z), name: e.dn ?? e.name, hp: Math.round(e.hp), maxHp: e.maxHp, targetingThem: e._targetId === owner })),
+            players: ctx.world.players.filter(pl => pl.owner !== owner && pl.currentPlace?.placeId === placeId && pl.pos && near(pl.pos.x, pl.pos.z))
+                .map(pl => ({ x: (0, geo_1.round2)(pl.pos.x), z: (0, geo_1.round2)(pl.pos.z), name: pl.name, bot: isBot(ctx, pl.owner) })),
+        } : { enemies: [], players: [] },
+    };
+}
+// this session's flags and the ones kept on the account - the payout record check passes again
+async function clearWatchFlags(ctx, p) {
+    const owner = ownerArg(p.owner);
+    const seen = (0, watch_1.clearFlags)(owner);
+    if (/^[a-f0-9]{24}$/i.test(owner)) {
+        await callRest("POST", `/admin/users/${owner}/flags/clear`, {});
+        (0, economy_1.clearAccountFlags)(owner);
+    }
+    else if (!seen)
+        return (0, types_1.fail)("nothing seen of that player yet");
+    return { owner, name: ctx.world.players.find(pl => pl.owner === owner)?.name ?? owner };
+}
+// ── VesselPay (economy.ts, and the REST server's wallets and withdrawals) ─────
+// a player's account id - bots and the undead have none
+const accountId = (value) => {
+    const id = text(value, "account", 40);
+    return /^[a-f0-9]{24}$/i.test(id) ? id : (0, types_1.fail)("that isn't a player account (bots and the undead have none)");
+};
+const requestId = (value) => {
+    const id = text(value, "request", 40);
+    return /^[a-f0-9]{24}$/i.test(id) ? id : (0, types_1.fail)("that isn't a request id");
+};
+const cad = (cents) => `CA$${(Number(cents || 0) / 100).toFixed(2)}`;
+function tellPlayer(ctx, owner, event, data) {
+    const player = ctx.world.players.find(pl => pl.owner === owner);
+    if (player?.socketId)
+        ctx.io.to(player.socketId).emit(event, data);
+    return player;
+}
+async function economyGet() {
+    let stats = null;
+    try {
+        stats = await callRest("GET", "/admin/payout-stats");
+    }
+    catch (error) {
+        stats = { error: error.message };
+    }
+    return { ...(0, economy_1.economyStatus)(), stats };
+}
+async function economySet(ctx, p) {
+    const given = p.settings && typeof p.settings === "object" ? p.settings : {};
+    const next = {};
+    if (given.enabled !== undefined)
+        next.enabled = flag(given.enabled);
+    if (given.payChance !== undefined)
+        next.payChance = num(given.payChance, "chance a slime pays", 0, 1);
+    if (given.slimePay && typeof given.slimePay === "object") {
+        next.slimePay = {};
+        for (const kind of economy_1.SLIME_KINDS)
+            if (given.slimePay[kind] !== undefined)
+                next.slimePay[kind] = int(given.slimePay[kind], `${kind} pay (cents)`, 0, 10000);
+    }
+    if (given.dailyCapCents !== undefined)
+        next.dailyCapCents = int(given.dailyCapCents, "daily cap (cents)", 0, 100000);
+    if (given.maxHitFlag !== undefined)
+        next.maxHitFlag = int(given.maxHitFlag, "huge-hit flag", 100, 10000000);
+    if (!(0, persistence_1.restConfigured)())
+        return (0, types_1.fail)("the REST server isn't set up for the admin (ADMIN_PERSIST is off)");
+    try {
+        return { settings: await (0, economy_1.saveSettings)(next) };
+    }
+    catch (error) {
+        return (0, types_1.fail)(`REST server: ${error?.message ?? error}`);
+    }
+}
+async function payoutsList(ctx, p) {
+    const status = ["pending", "paid", "rejected", "all"].includes(p.status) ? p.status : "pending";
+    // what's owed from kills goes first, so the balances shown are current
+    await (0, economy_1.flush)().catch(() => { });
+    return callRest("GET", `/admin/withdrawals?status=${status}&limit=100`);
+}
+async function payoutPaid(ctx, p) {
+    const id = requestId(p.id);
+    const txnId = text(p.txnId, "PayPal transaction id", 80);
+    const note = p.note ? text(p.note, "note", 500) : "";
+    const res = await callRest("POST", `/admin/withdrawals/${id}/paid`, { txnId, note, by: ctx.ip });
+    const w = res.withdrawal;
+    tellPlayer(ctx, w.owner, "payout-decided", { status: "paid", amountCents: w.amountCents });
+    return { id, username: w.username, amountCents: w.amountCents };
+}
+async function payoutReject(ctx, p) {
+    const id = requestId(p.id);
+    const reason = text(p.reason, "reason", 300);
+    const refund = !(p.refund === false || p.refund === "false");
+    const res = await callRest("POST", `/admin/withdrawals/${id}/reject`, { reason, refund, note: p.note ? text(p.note, "note", 500) : "", by: ctx.ip });
+    const w = res.withdrawal;
+    tellPlayer(ctx, w.owner, "payout-decided", { status: "rejected", refunded: refund, reason, amountCents: w.amountCents });
+    return { id, username: w.username, amountCents: w.amountCents, refunded: refund };
+}
+// ── accounts ─────────────────────────────────────────────────────────────────
+async function accountGet(ctx, p) {
+    return callRest("GET", `/admin/users/${accountId(p.owner)}`);
+}
+async function accountBan(ctx, p) {
+    const owner = accountId(p.owner);
+    const banned = !(p.banned === false || p.banned === "false");
+    const reason = banned ? text(p.reason, "reason", 300) : "";
+    const res = await callRest("POST", `/admin/users/${owner}/ban`, { banned, reason });
+    (0, economy_1.setStanding)(owner, { banned });
+    if (banned) {
+        const player = tellPlayer(ctx, owner, "account-banned", { reason });
+        if (player?.socketId)
+            setTimeout(() => ctx.io.sockets.sockets.get(player.socketId)?.disconnect(true), 400);
+    }
+    return { owner, username: res.username, banned };
+}
+async function accountFreeze(ctx, p) {
+    const owner = accountId(p.owner);
+    const frozen = !(p.frozen === false || p.frozen === "false");
+    const reason = frozen ? text(p.reason, "reason", 300) : "";
+    const res = await callRest("POST", `/admin/users/${owner}/freeze`, { frozen, reason });
+    (0, economy_1.setStanding)(owner, { frozen });
+    tellPlayer(ctx, owner, "wallet-frozen", { frozen, reason });
+    return { owner, username: res.username, frozen };
+}
 // ── the registry ─────────────────────────────────────────────────────────────
 exports.COMMANDS = {
     // what the page can pick from
@@ -525,6 +673,25 @@ exports.COMMANDS = {
     "bots.spawn": { audit: true, run: spawnBots, describe: (p, r) => `${r.spawned} bot` },
     "persist.retry": { audit: true, run: () => { persistence_1.store.retry(); return { status: persistence_1.store.status }; }, describe: () => "retrying the load" },
     "persist.flush": { audit: true, run: async () => { await persistence_1.store.flush(); return { status: persistence_1.store.status }; }, describe: () => "save now" },
+    // watching players
+    "watch.list": { audit: false, run: () => ({ players: (0, watch_1.watchList)() }) },
+    "watch.get": { audit: false, run: watchGet },
+    "watch.clearFlags": { audit: true, run: clearWatchFlags, describe: (p, r) => `${r.name}` },
+    // VesselPay
+    "economy.get": { audit: false, run: economyGet },
+    "economy.set": { audit: true, run: economySet, describe: (p, r) => {
+            const st = r.settings;
+            const pay = economy_1.SLIME_KINDS.map(kind => `${kind.replace("slime", "")} ${st.slimePay?.[kind] ?? 0}c`).join("/");
+            return `${st.enabled ? "on" : "OFF"}, ${Math.round(st.payChance * 100)}% chance, ${pay}, cap ${cad(st.dailyCapCents)}/day, huge-hit ${st.maxHitFlag}`;
+        } },
+    "payouts.list": { audit: false, run: payoutsList },
+    "payouts.paid": { audit: true, run: payoutPaid, describe: (p, r) => `${r.username} ${cad(r.amountCents)} - PayPal txn ${String(p.txnId).slice(0, 40)}` },
+    "payouts.reject": { audit: true, run: payoutReject, describe: (p, r) => `${r.username} ${cad(r.amountCents)} ${r.refunded ? "refunded" : "VOIDED"}: ${String(p.reason).slice(0, 80)}` },
+    // accounts
+    "accounts.get": { audit: false, run: accountGet },
+    "accounts.ban": { audit: true, run: accountBan, describe: (p, r) => `${r.username} ${r.banned ? "BANNED" : "unbanned"}${p.reason ? ": " + String(p.reason).slice(0, 80) : ""}` },
+    "accounts.freeze": { audit: true, run: accountFreeze, describe: (p, r) => `${r.username} ${r.frozen ? "frozen" : "unfrozen"}${p.reason ? ": " + String(p.reason).slice(0, 80) : ""}` },
+    "accounts.banned": { audit: false, run: () => callRest("GET", "/admin/banned") },
 };
 // ── bringing saved placements back ───────────────────────────────────────────
 // After a restart (persistence.ts's load): everything an admin kept is put back
