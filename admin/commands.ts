@@ -1,3 +1,4 @@
+import crypto from "crypto"
 import { randNumString } from "../tools/tools"
 import { AdminContext, fail } from "./types"
 import { ENEMY_KINDS, enemyKind, PLACES, placeById, ITEM_PRESETS, itemPreset, MUSHROOM_KINDS, ORE_VEINS } from "./catalog"
@@ -10,8 +11,9 @@ import { setWeather, getWeatherState, WEATHER_TYPES } from "../recources/weather
 import { setTimeOfDay, getDayNightState } from "../recources/dayNight"
 import { ground, scatter, homeRoomFor, round2 } from "./geo"
 import { store, requestRest, restConfigured, Overlay } from "./persistence"
+import { tomeSupplyStatus } from "../recources/tomeSupply"
 import { watchDetail, watchList, noteTeleport, clearFlags } from "./watch"
-import { getSettings as economySettings, saveSettings as saveEconomy, setStanding, purseOf, economyStatus, flush as flushEconomy, clearAccountFlags, SLIME_KINDS } from "./economy"
+import { getSettings as economySettings, saveSettings as saveEconomy, setStanding, purseOf, economyStatus, flush as flushEconomy, clearAccountFlags, SLIME_KINDS, setRegistration } from "./economy"
 
 // Everything an admin can do, one function each. A command gets the live world
 // and the socket server (see types.ts) and a payload that came off the wire, so
@@ -581,6 +583,40 @@ async function accountFreeze(ctx: AdminContext, p: any) {
     return { owner, username: res.username, frozen }
 }
 
+// ── registered players ───────────────────────────────────────────────────────
+// the ID a registered player gets - made here, by tcp: "VP-" and two groups of four, letters and digits
+// that can't be misread (no 0/O, 1/I)
+const ID_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+function newPlayerId() {
+    const bytes = crypto.randomBytes(8)
+    const chars = [...bytes].map(b => ID_CHARS[b % ID_CHARS.length]).join("")
+    return `VP-${chars.slice(0, 4)}-${chars.slice(4, 8)}`
+}
+
+// grants it: a fresh unique ID (tried again on the rare clash), kept on the account, and the player's
+// card turns green at once if they're online
+async function accountRegister(ctx: AdminContext, p: any) {
+    const owner = accountId(p.owner)
+    let res: any = null
+    for (let attempt = 0; attempt < 5 && !res; attempt++) {
+        try {
+            res = await callRest("POST", `/admin/users/${owner}/registration`, { status: "registered", playerId: newPlayerId() })
+        } catch (error: any) {
+            if (!/taken/.test(error?.message ?? "")) throw error
+        }
+    }
+    if (!res) return fail("couldn't make a unique player id - try again")
+    setRegistration(owner, res.registration)
+    return { owner, username: res.username, playerId: res.registration?.playerId }
+}
+
+async function accountUnregister(ctx: AdminContext, p: any) {
+    const owner = accountId(p.owner)
+    const res = await callRest("POST", `/admin/users/${owner}/registration`, { status: "none" })
+    setRegistration(owner, res.registration)
+    return { owner, username: res.username }
+}
+
 // ── the registry ─────────────────────────────────────────────────────────────
 export const COMMANDS: Record<string, Command> = {
     // what the page can pick from
@@ -704,6 +740,11 @@ export const COMMANDS: Record<string, Command> = {
     "accounts.ban": { audit: true, run: accountBan, describe: (p, r) => `${r.username} ${r.banned ? "BANNED" : "unbanned"}${p.reason ? ": " + String(p.reason).slice(0, 80) : ""}` },
     "accounts.freeze": { audit: true, run: accountFreeze, describe: (p, r) => `${r.username} ${r.frozen ? "frozen" : "unfrozen"}${p.reason ? ": " + String(p.reason).slice(0, 80) : ""}` },
     "accounts.banned": { audit: false, run: () => callRest("GET", "/admin/banned") },
+    // limited Legendary / God tier tomes: how many of each found (recources/tomeSupply.ts)
+    "tomes.supply": { audit: false, run: () => tomeSupplyStatus() },
+    "accounts.registrations": { audit: false, run: (ctx, p) => callRest("GET", `/admin/registrations?status=${p?.status === "registered" ? "registered" : "requesting"}`) },
+    "accounts.register": { audit: true, run: accountRegister, describe: (p, r) => `${r.username} registered as ${r.playerId}` },
+    "accounts.unregister": { audit: true, run: accountUnregister, describe: (p, r) => `${r.username} unregistered` },
 }
 
 // ── bringing saved placements back ───────────────────────────────────────────

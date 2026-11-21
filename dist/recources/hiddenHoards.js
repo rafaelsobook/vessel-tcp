@@ -9,6 +9,7 @@ const botItems_1 = require("./botItems");
 const mushroomLibrary_1 = require("./mushroomLibrary");
 const treasuresInDungeon_1 = require("./treasuresInDungeon");
 const hiddenPlaces_1 = require("./hiddenPlaces");
+const skillTomes_1 = require("./skillTomes");
 // THE HIDDEN PLACES' HOARDS - the best loot in the open world, left where only
 // someone exploring finds it: at the bottom of the wells, walled away in the
 // grottos' mazes, in the caves behind the waterfalls (hiddenPlaces.ts, from
@@ -302,44 +303,18 @@ function rollFood() {
         return { ...rollRarestKind().item(), qnty: randInt(1, 2) };
     return (0, treasuresInDungeon_1.lunaraqum)(randInt(2, 3));
 }
-// [the client's skillsData.js name, its displayName, its skillrank] - not
-// crescenthowl: only Sable teaches that one
-const TOME_SKILLS = [
-    ["thunderstrike", "Thunderstrike", 2], ["lightpierce", "Lightpierce", 2], ["radiantjudgment", "Radiant Judgment", 2],
-    ["shadowbolt", "Shadowbolt", 2], ["voidrend", "Voidrend", 2], ["pyroclasm", "Pyroclasm", 2],
-    ["solarcataclysm", "Solar Cataclysm", 2], ["tsunamiwrath", "Tsunami Wrath", 2], ["abyssalcurrent", "Abyssal Current", 2],
-    ["continentalrend", "Continental Rend", 2], ["seismicjudgment", "Seismic Judgment", 2], ["celestialverdict", "Celestial Verdict", 2],
-    ["seraphicascension", "Seraphic Ascension", 2], ["voidcurse", "Void Curse", 2], ["abyssaldamnation", "Abyssal Damnation", 2],
-    ["zoltraak", "Zoltraak", 2],
-    ["burstshots", "Burst Shots", 3], ["disintegration", "Disintegration", 3], ["mjolnir", "Mjolnir", 3],
-    ["wellspring", "Wellspring", 3], ["purification", "Purification", 3],
-    ["astralrain", "Astral Rain", 4], ["darkorb", "Dark Orb", 4], ["multicast", "Multicast", 4],
-    ["massivedisintegration", "Massive Disintegration", 4], ["meteor", "Meteor", 4], ["thunderclap", "Thunderclap", 4],
-];
-const TOME_RANK = { rare: 2, epic: 3, legendary: 4, mythic: 4 };
-// skillBooks.js's SKILLBOOK_PRICE_BY_RANK, and a mythic printing above it
-const TOME_PRICE = { rare: 220, epic: 500, legendary: 1100, mythic: 1600 };
+// ── The tome at the end of a grotto's maze ───────────────────────────────────
+// A skill book (the client's skillBooks.js makeSkillBook shape - it fills in
+// the book's description from the skill when it's taken). Its rarity rides on
+// the skill's rank as the witches' books do (rare: rank 2, epic: 3,
+// legendary: 4), and a rank-4 one can turn up mythic - the client's tome
+// ceremony and the book's aura both play up to it. Further out, rarer.
 // the odds of each rarity at the nearest grotto, and at the furthest
 const TOME_ODDS_NEAR = [["rare", 50], ["epic", 32], ["legendary", 15], ["mythic", 3]];
 const TOME_ODDS_FAR = [["rare", 15], ["epic", 35], ["legendary", 35], ["mythic", 15]];
 function rollTomeRarity(place) {
     const t = farOut(place);
     return weighted(TOME_ODDS_NEAR.map(([rarity, near], i) => [rarity, near + (TOME_ODDS_FAR[i][1] - near) * t]));
-}
-function tomeItem(rarity) {
-    const [skillName, displayName] = pick(TOME_SKILLS.filter(([, , rank]) => rank === TOME_RANK[rarity]));
-    return {
-        itemId: (0, tools_1.randNumString)(),
-        // the skill's own name, as every skill book's (it stacks with its copies)
-        name: skillName,
-        skillName,
-        dn: `Tome of ${displayName}`,
-        itemCateg: "skillbook",
-        itemType: "skillbook",
-        price: { coinType: "bronze", pieces: TOME_PRICE[rarity] },
-        qnty: 1,
-        rarity,
-    };
 }
 // ── The chest ────────────────────────────────────────────────────────────────
 // its headline piece (the chest's skin follows its rarity), then the rest
@@ -354,7 +329,21 @@ function rollChestContents(place) {
         extras.push(rollFood());
     if (place.kind === "grotto")
         extras.push(bronzeCoins(place));
+    // a skill tome, now and then (skillTomes.ts) - a Legendary one only at falls and grottos, likelier far out
+    const tome = rollHoardTome(place);
+    if (tome)
+        extras.push(tome);
     return { headline, extras };
+}
+// the witches stop at Elite - High is found here, Legendary at the deeper places (skillTomes.ts)
+const HOARD_TOME_HIGH = { well: 0.2, falls: 0.25, grotto: 0.25 };
+const HOARD_TOME_LEGENDARY_NEAR = 0.06, HOARD_TOME_LEGENDARY_FAR = 0.16;
+function rollHoardTome(place) {
+    if (place.kind !== "well" && Math.random() < HOARD_TOME_LEGENDARY_NEAR + (HOARD_TOME_LEGENDARY_FAR - HOARD_TOME_LEGENDARY_NEAR) * farOut(place))
+        return (0, skillTomes_1.tomeOfRank)(3);
+    if (Math.random() < (HOARD_TOME_HIGH[place.kind] ?? 0.2))
+        return (0, skillTomes_1.tomeOfRank)(2);
+    return null;
 }
 const placeByKey = (key) => hiddenPlaces_1.HIDDEN_PLACES.find(p => p.key === key);
 const at = (spot, lift = 0) => ({ x: spot.x, y: round2(spot.y + lift), z: spot.z });
@@ -406,7 +395,7 @@ function hoardWeaponRespawnOf(taken) {
 // client draws as a book (look)
 function hoardTome(place) {
     return {
-        ...(0, treasures_1.createTreasure)(at(place.tome), OPENWORLD_PLACE_ID, tomeItem(rollTomeRarity(place))),
+        ...(0, treasures_1.createTreasure)(at(place.tome), OPENWORLD_PLACE_ID, (0, skillTomes_1.tomeItem)(rollTomeRarity(place))),
         exactY: true, hoardKey: place.key, respawns: "hiddenTome", look: "tome",
     };
 }

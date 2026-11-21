@@ -4,6 +4,7 @@ exports.DUNGEON_TREASURES = void 0;
 exports.lunaraqum = lunaraqum;
 const tools_1 = require("../tools/tools");
 const treasures_1 = require("./treasures");
+const skillTomes_1 = require("./skillTomes");
 const craftingSupplies_1 = require("./craftingSupplies");
 const dungeonLayouts_1 = require("./dungeonLayouts");
 // Treasure chests inside the procedural BSP dungeons - same world-treasure
@@ -120,8 +121,9 @@ function spawnDungeonTreasures(placeId, dungeon) {
         const spots = (0, dungeonLayouts_1.standableCells)(dungeon, r, false)
             .filter(c => c.y === backRow && !river.has((0, dungeonLayouts_1.cellKey)(c)))
             .sort((a, b) => Math.abs(a.x - midX) - Math.abs(b.x - midX));
+        // and now and then a High skill tome with the blade (skillTomes.ts)
         if (spots.length)
-            chests.push(chestAt(placeId, dungeon, spots[0], false, armoryBlade()));
+            chests.push(chestAt(placeId, dungeon, spots[0], false, armoryBlade(), Math.random() < 0.2 ? [(0, skillTomes_1.tomeOfRank)(2)] : []));
     });
     // the boss's reward - beside its throne, as deep into the dais as it gets
     const throne = (0, dungeonLayouts_1.bossThrone)(dungeon);
@@ -130,8 +132,11 @@ function spawnDungeonTreasures(placeId, dungeon) {
             .filter(c => (0, dungeonLayouts_1.cellKey)(c) !== (0, dungeonLayouts_1.cellKey)(throne.cell))
             .sort((a, b) => throne.depth(b) - throne.depth(a)
             || Math.hypot(a.x - throne.cell.x, a.y - throne.cell.y) - Math.hypot(b.x - throne.cell.x, b.y - throne.cell.y));
+        // a god's worth, sometimes: a God tier tome (or a Legendary one) beside the blade (skillTomes.ts)
+        const roll = Math.random();
+        const tome = roll < 0.1 ? [(0, skillTomes_1.tomeOfRank)(4)] : roll < 0.4 ? [(0, skillTomes_1.tomeOfRank)(3)] : [];
         if (spots.length)
-            chests.push(chestAt(placeId, dungeon, spots[0], true, bossBlade()));
+            chests.push(chestAt(placeId, dungeon, spots[0], true, bossBlade(), tome));
     }
     return chests;
 }

@@ -5,6 +5,8 @@ exports.loadSettings = loadSettings;
 exports.saveSettings = saveSettings;
 exports.verifySession = verifySession;
 exports.payKill = payKill;
+exports.setRegistration = setRegistration;
+exports.requestRegistration = requestRegistration;
 exports.clearAccountFlags = clearAccountFlags;
 exports.flush = flush;
 exports.forfeit = forfeit;
@@ -40,7 +42,7 @@ const emptyOwed = () => ({ cents: 0, kills: 0, lucky: 0, best: 0, recent: [] });
 function purse(owner) {
     let p = purses.get(owner);
     if (!p) {
-        p = { owner, username: "", session: "pending", isGuest: false, banned: false, frozen: false, accountBadFlags: 0, day: dayKey(), dayCents: 0, balance: 0, owed: emptyOwed(), waiting: [], told: new Set(), diedAt: 0 };
+        p = { owner, username: "", session: "pending", isGuest: false, banned: false, frozen: false, accountBadFlags: 0, registration: { status: "none", playerId: null }, day: dayKey(), dayCents: 0, balance: 0, owed: emptyOwed(), waiting: [], told: new Set(), diedAt: 0 };
         purses.set(owner, p);
     }
     if (p.day !== dayKey()) {
@@ -118,6 +120,8 @@ function verifySession(socketId, owner, name, token, alreadyFor, onValid) {
             p.banned = !!res?.banned;
             p.frozen = !!res?.frozen;
             p.accountBadFlags = Number(res?.badFlags) || 0;
+            if (res?.registration)
+                p.registration = { status: res.registration.status || "none", playerId: res.registration.playerId || null };
             const w = res?.wallet;
             if (w) {
                 p.balance = w.cents ?? 0;
@@ -168,7 +172,7 @@ function tellState(p) {
     hooks.emitTo(p.owner, "wallet-state", {
         enabled: settings.enabled, session: p.session, isGuest: p.isGuest, frozen: p.frozen,
         balance: p.balance + p.owed.cents, dayCents: p.dayCents, capCents: settings.dailyCapCents,
-        minWithdrawCents: exports.MIN_WITHDRAW_CENTS, currency: "CAD",
+        minWithdrawCents: exports.MIN_WITHDRAW_CENTS, currency: "CAD", registration: p.registration,
     });
 }
 // ── paying a kill ────────────────────────────────────────────────────────────
@@ -228,6 +232,34 @@ function payKill(owner, kind, name, targetId, unpaidReason) {
         targetId, name, kind, checks, cents, stake: base,
         balance: p.balance + p.owed.cents, dayCents: p.dayCents, capCents: settings.dailyCapCents,
     });
+}
+// ── Registered Player ────────────────────────────────────────────────────────
+/** The status changed (the player asked, an admin granted) - the purse and the player's own card hear at once. */
+function setRegistration(owner, registration) {
+    const p = purse(owner);
+    p.registration = { status: registration?.status || "none", playerId: registration?.playerId || null };
+    hooks.emitTo(owner, "wallet-registration", p.registration);
+    return p.registration;
+}
+/**
+ * The player pressed "Send request" on their VesselPay card (index.ts "registration-request"). Only a
+ * checked login asks; a registered one is told it already is. The REST server keeps it on the account.
+ */
+async function requestRegistration(owner) {
+    const p = purse(owner);
+    if (p.registration.status === "registered")
+        return hooks.emitTo(owner, "wallet-registration", p.registration);
+    if (p.session !== "valid")
+        return hooks.emitTo(owner, "wallet-registration", { ...p.registration, error: "Your login couldn't be checked - reload the game and try again." });
+    if (p.isGuest)
+        return hooks.emitTo(owner, "wallet-registration", { ...p.registration, error: "Guest accounts can't register - save your hero with a username and password first." });
+    try {
+        const res = await (0, persistence_1.requestRest)("POST", `/admin/users/${owner}/registration`, { status: "requesting" });
+        setRegistration(owner, res?.registration ?? { status: "requesting", playerId: null });
+    }
+    catch (error) {
+        hooks.emitTo(owner, "wallet-registration", { ...p.registration, error: "Couldn't send it - try again in a moment." });
+    }
 }
 /** An admin cleared their flags (commands.ts) - the record check passes again. */
 function clearAccountFlags(owner) {
@@ -318,7 +350,7 @@ async function forfeit(owner) {
         try {
             const res = await (0, persistence_1.requestRest)("POST", `/admin/wallets/${owner}/forfeit`, { reason: "died" });
             if (res?.forfeited)
-                console.log(`[economy] ${p?.username || owner} died - CA${(res.forfeited / 100).toFixed(2)} of VesselPay gone with them`);
+                console.log(`[economy] ${p?.username || owner} died - CA$${(res.forfeited / 100).toFixed(2)} of VesselPay gone with them`);
             return;
         }
         catch (error) {
@@ -344,7 +376,7 @@ function purseOf(owner) {
     const p = purses.get(owner);
     if (!p)
         return null;
-    return { session: p.session, isGuest: p.isGuest, banned: p.banned, frozen: p.frozen, dayCents: p.dayCents, balance: p.balance + p.owed.cents, owedCents: p.owed.cents, waiting: p.waiting.length };
+    return { registration: p.registration, session: p.session, isGuest: p.isGuest, banned: p.banned, frozen: p.frozen, dayCents: p.dayCents, balance: p.balance + p.owed.cents, owedCents: p.owed.cents, waiting: p.waiting.length };
 }
 function startEconomy(h) {
     hooks = h;

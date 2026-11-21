@@ -1,7 +1,11 @@
 "use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.COMMANDS = void 0;
 exports.restoreOverlay = restoreOverlay;
+const crypto_1 = __importDefault(require("crypto"));
 const tools_1 = require("../tools/tools");
 const types_1 = require("./types");
 const catalog_1 = require("./catalog");
@@ -14,6 +18,7 @@ const weather_1 = require("../recources/weather");
 const dayNight_1 = require("../recources/dayNight");
 const geo_1 = require("./geo");
 const persistence_1 = require("./persistence");
+const tomeSupply_1 = require("../recources/tomeSupply");
 const watch_1 = require("./watch");
 const economy_1 = require("./economy");
 // ── limits and validation ────────────────────────────────────────────────────
@@ -575,6 +580,40 @@ async function accountFreeze(ctx, p) {
     tellPlayer(ctx, owner, "wallet-frozen", { frozen, reason });
     return { owner, username: res.username, frozen };
 }
+// ── registered players ───────────────────────────────────────────────────────
+// the ID a registered player gets - made here, by tcp: "VP-" and two groups of four, letters and digits
+// that can't be misread (no 0/O, 1/I)
+const ID_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+function newPlayerId() {
+    const bytes = crypto_1.default.randomBytes(8);
+    const chars = [...bytes].map(b => ID_CHARS[b % ID_CHARS.length]).join("");
+    return `VP-${chars.slice(0, 4)}-${chars.slice(4, 8)}`;
+}
+// grants it: a fresh unique ID (tried again on the rare clash), kept on the account, and the player's
+// card turns green at once if they're online
+async function accountRegister(ctx, p) {
+    const owner = accountId(p.owner);
+    let res = null;
+    for (let attempt = 0; attempt < 5 && !res; attempt++) {
+        try {
+            res = await callRest("POST", `/admin/users/${owner}/registration`, { status: "registered", playerId: newPlayerId() });
+        }
+        catch (error) {
+            if (!/taken/.test(error?.message ?? ""))
+                throw error;
+        }
+    }
+    if (!res)
+        return (0, types_1.fail)("couldn't make a unique player id - try again");
+    (0, economy_1.setRegistration)(owner, res.registration);
+    return { owner, username: res.username, playerId: res.registration?.playerId };
+}
+async function accountUnregister(ctx, p) {
+    const owner = accountId(p.owner);
+    const res = await callRest("POST", `/admin/users/${owner}/registration`, { status: "none" });
+    (0, economy_1.setRegistration)(owner, res.registration);
+    return { owner, username: res.username };
+}
 // ── the registry ─────────────────────────────────────────────────────────────
 exports.COMMANDS = {
     // what the page can pick from
@@ -692,6 +731,11 @@ exports.COMMANDS = {
     "accounts.ban": { audit: true, run: accountBan, describe: (p, r) => `${r.username} ${r.banned ? "BANNED" : "unbanned"}${p.reason ? ": " + String(p.reason).slice(0, 80) : ""}` },
     "accounts.freeze": { audit: true, run: accountFreeze, describe: (p, r) => `${r.username} ${r.frozen ? "frozen" : "unfrozen"}${p.reason ? ": " + String(p.reason).slice(0, 80) : ""}` },
     "accounts.banned": { audit: false, run: () => callRest("GET", "/admin/banned") },
+    // limited Legendary / God tier tomes: how many of each found (recources/tomeSupply.ts)
+    "tomes.supply": { audit: false, run: () => (0, tomeSupply_1.tomeSupplyStatus)() },
+    "accounts.registrations": { audit: false, run: (ctx, p) => callRest("GET", `/admin/registrations?status=${p?.status === "registered" ? "registered" : "requesting"}`) },
+    "accounts.register": { audit: true, run: accountRegister, describe: (p, r) => `${r.username} registered as ${r.playerId}` },
+    "accounts.unregister": { audit: true, run: accountUnregister, describe: (p, r) => `${r.username} unregistered` },
 };
 // ── bringing saved placements back ───────────────────────────────────────────
 // After a restart (persistence.ts's load): everything an admin kept is put back

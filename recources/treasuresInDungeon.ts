@@ -1,5 +1,6 @@
 import { randNumString } from "../tools/tools"
 import { createTreasure } from "./treasures"
+import { tomeOfRank } from "./skillTomes"
 import { rollSupplies, TsupplyRoll } from "./craftingSupplies"
 import { DUNGEONS, Cell, cellKey, toWorld, roomRect, bossRect, bossThrone, standableCells, floorY } from "./dungeonLayouts"
 
@@ -132,7 +133,8 @@ function spawnDungeonTreasures(placeId: number, dungeon: any) {
         const spots = standableCells(dungeon, r, false)
             .filter(c => c.y === backRow && !river.has(cellKey(c)))
             .sort((a, b) => Math.abs(a.x - midX) - Math.abs(b.x - midX))
-        if (spots.length) chests.push(chestAt(placeId, dungeon, spots[0], false, armoryBlade()))
+        // and now and then a High skill tome with the blade (skillTomes.ts)
+        if (spots.length) chests.push(chestAt(placeId, dungeon, spots[0], false, armoryBlade(), Math.random() < 0.2 ? [tomeOfRank(2)] : []))
     })
 
     // the boss's reward - beside its throne, as deep into the dais as it gets
@@ -142,7 +144,10 @@ function spawnDungeonTreasures(placeId: number, dungeon: any) {
             .filter(c => cellKey(c) !== cellKey(throne.cell))
             .sort((a, b) => throne.depth(b) - throne.depth(a)
                 || Math.hypot(a.x - throne.cell.x, a.y - throne.cell.y) - Math.hypot(b.x - throne.cell.x, b.y - throne.cell.y))
-        if (spots.length) chests.push(chestAt(placeId, dungeon, spots[0], true, bossBlade()))
+        // a god's worth, sometimes: a God tier tome (or a Legendary one) beside the blade (skillTomes.ts)
+        const roll = Math.random()
+        const tome = roll < 0.1 ? [tomeOfRank(4)] : roll < 0.4 ? [tomeOfRank(3)] : []
+        if (spots.length) chests.push(chestAt(placeId, dungeon, spots[0], true, bossBlade(), tome))
     }
 
     return chests

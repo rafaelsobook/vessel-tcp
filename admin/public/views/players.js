@@ -12,6 +12,11 @@ export function create(app) {
     const body = el("tbody")
     const onlineCount = el("span", { class: "muted" })
 
+    // ── registration requests (online or not) ────────────────────────────────
+    const regBody = el("tbody")
+    const regCount = el("span", { class: "muted" })
+    let requests = []
+
     // ── characters that aren't online ────────────────────────────────────────
     const searchInput = el("input", { type: "text", placeholder: "Character name...", maxlength: 60, onkeydown: event => { if (event.key === "Enter") search() } })
     const savedBody = el("tbody")
@@ -19,9 +24,15 @@ export function create(app) {
 
     root.append(
         el("div", { class: "panel" },
+            el("div", { class: "panel-head" }, el("h2", { text: "Registration requests" }), regCount, el("span", { class: "grow" }), button("Refresh", () => loadRequests(), { small: true })),
+            el("div", { class: "hint", text: "Players who pressed \"Send request\" on their VesselPay card. Check their message in Discord, then Register - they get a player ID and their card turns green." }),
+            el("div", { class: "table-wrap", style: "margin-top:10px" }, el("table", { onclick: onRegClick },
+                el("thead", {}, el("tr", {}, ["Account", "Asked", ""].map(text => el("th", { text })))),
+                regBody))),
+        el("div", { class: "panel" },
             el("div", { class: "panel-head" }, el("h2", { text: "Online" }), onlineCount, el("span", { class: "grow" }), el("div", { style: "width:260px" }, filter)),
             el("div", { class: "table-wrap" }, el("table", { onclick: onTableClick },
-                el("thead", {}, el("tr", {}, ["Name", "Lvl", "Place", "Position (x, z)", "Mode", "", ""].map(text => el("th", { text })))),
+                el("thead", {}, el("tr", {}, ["Name", "Lvl", "Place", "Position (x, z)", "Mode", "", "", "Registered"].map(text => el("th", { text })))),
                 body))),
         el("div", { class: "panel" },
             el("div", { class: "panel-head" }, el("h2", { text: "Characters not online" }), el("span", { class: "grow" }),
@@ -38,7 +49,7 @@ export function create(app) {
         const rows = players.filter(player => !needle || player.name.toLowerCase().includes(needle) || player.place.toLowerCase().includes(needle))
         onlineCount.textContent = `${players.filter(p => !p.bot).length} players, ${players.filter(p => p.bot).length} bots`
         clear(body)
-        if (!rows.length) return body.append(emptyRow(7, players.length ? "Nothing matches the filter" : "Nobody is in the world"))
+        if (!rows.length) return body.append(emptyRow(8, players.length ? "Nothing matches the filter" : "Nobody is in the world"))
         rows.forEach(player => {
             const watch = player.watch
             const status = [
@@ -70,13 +81,62 @@ export function create(app) {
                 el("td", { class: "mono", text: fmtPos(player.pos) }),
                 el("td", { text: player.mode ?? "-" }),
                 el("td", {}, player.hp != null ? chip(`hp ${Math.round(player.hp)}/${player.maxHp}`) : null),
-                actions))
+                actions,
+                el("td", { class: "actions" }, registrationCell(player))))
         })
+    }
+
+    // Registered Player: green with its ID, a crimson "Requesting - register" button, or not
+    function registrationCell(player) {
+        if (player.bot) return null
+        const reg = player.purse?.registration
+        if (reg?.status === "registered") return chip(reg.playerId || "registered", "good")
+        if (reg?.status === "requesting") {
+            const b = button("Requesting - register", null, { small: true, kind: "danger", title: "They asked on their VesselPay card - check Discord, then grant it" })
+            b.dataset.reg = player.owner
+            b.dataset.name = player.name
+            return b
+        }
+        return chip("not registered")
+    }
+
+    async function register(owner, name) {
+        const ok = await confirmDialog(`Register ${name} as a player? They get a unique player ID and their VesselPay card turns green.`, "Register", false)
+        if (!ok) return
+        const result = await app.run("accounts.register", { owner }, r => `${r.username} registered - ${r.playerId}`)
+        if (result) loadRequests()
+    }
+
+    async function loadRequests() {
+        clear(regBody).append(emptyRow(3, "Loading..."))
+        const result = await app.run("accounts.registrations", { status: "requesting" })
+        requests = result?.players ?? []
+        regCount.textContent = requests.length ? `${requests.length} waiting` : ""
+        clear(regBody)
+        if (!result) return regBody.append(emptyRow(3, "Couldn't load them"))
+        if (!requests.length) return regBody.append(emptyRow(3, "Nobody is waiting"))
+        requests.forEach(req => {
+            const online = players.some(p => p.owner === req.owner)
+            const b = button("Register", null, { small: true, kind: "primary" })
+            b.dataset.reg = req.owner
+            b.dataset.name = req.username
+            regBody.append(el("tr", {},
+                el("td", {}, req.username, " ", online ? chip("online", "good") : null),
+                el("td", { text: req.requestedAt ? new Date(req.requestedAt).toLocaleString() : "-" }),
+                el("td", { class: "actions" }, b)))
+        })
+    }
+
+    function onRegClick(event) {
+        const btn = event.target.closest("button[data-reg]")
+        if (btn) register(btn.dataset.reg, btn.dataset.name)
     }
 
     function playerOf(owner) { return players.find(player => player.owner === owner) }
 
     function onTableClick(event) {
+        const regBtn = event.target.closest("button[data-reg]")
+        if (regBtn) return register(regBtn.dataset.reg, regBtn.dataset.name)
         const btn = event.target.closest("button[data-act]")
         if (!btn) return
         const player = playerOf(btn.dataset.owner)
@@ -218,14 +278,18 @@ export function create(app) {
         })
     }
 
+    let lastAsking = ""
     function onSnapshot(snapshot) {
         players = snapshot.players
+        const asking = players.filter(p => p.purse?.registration?.status === "requesting").map(p => p.owner).sort().join()
+        if (asking !== lastAsking && !root.hidden) loadRequests()
+        lastAsking = asking
         if (!root.hidden) render()
     }
 
     return {
         id: "players", title: "Players", root, onSnapshot,
-        onShow: () => render(),
+        onShow: () => { render(); loadRequests() },
         badge: snapshot => snapshot?.world.players,
     }
 }

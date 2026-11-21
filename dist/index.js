@@ -52,6 +52,7 @@ const quests_1 = __importStar(require("./recources/quests"));
 const genenemy_1 = require("./generate-datas/genenemy");
 const treasures_1 = require("./recources/treasures");
 const pickupClaims_1 = require("./recources/pickupClaims");
+const tomeSupply_1 = require("./recources/tomeSupply");
 const treasuresInDungeon_1 = require("./recources/treasuresInDungeon");
 const hiddenHoards_1 = require("./recources/hiddenHoards");
 const grains_1 = require("./recources/grains");
@@ -1387,17 +1388,34 @@ io.on("connection", (socket) => {
             return reply({ ok: false, reason: "unknown" });
         if (!exists(id))
             return reply({ ok: false, reason: "gone" });
-        reply((0, pickupClaims_1.claimPickup)(kind, id, owner, ms) ? { ok: true } : { ok: false, reason: "taken" });
+        if (!(0, pickupClaims_1.claimPickup)(kind, id, owner, ms))
+            return reply({ ok: false, reason: "taken" });
+        // a chest with a Legendary / God tier tome: a copy is reserved for them, or swapped if none is left
+        // (recources/tomeSupply.ts) - the answer carries what is really inside then
+        if (kind === "treasure") {
+            const tomes = (0, tomeSupply_1.reserveChest)(treasures.find(t => t.itemId === id), ms);
+            if (!tomes.ok) {
+                (0, pickupClaims_1.releasePickup)(kind, id, owner);
+                return reply({ ok: false, reason: tomes.reason });
+            }
+            return reply({ ok: true, contents: tomes.contents, swapped: tomes.swapped });
+        }
+        reply({ ok: true });
     });
     // a client giving up on a pickup before its bar filled (walked off, died)
     safeOn(socket, "releasePickup", data => {
         const { kind, id, owner } = data ?? {};
         if (kind && id)
             (0, pickupClaims_1.releasePickup)(kind, id, owner);
+        if (kind === "treasure" && id)
+            (0, tomeSupply_1.releaseChest)(id);
     });
     safeOn(socket, "removeTreasure", treasureId => {
         (0, pickupClaims_1.releasePickup)("treasure", treasureId);
         const opened = treasures.find(treasure => treasure.itemId === treasureId);
+        // its limited tomes are found for good (recources/tomeSupply.ts)
+        if (opened)
+            (0, tomeSupply_1.confirmChest)(opened);
         treasures = treasures.filter(treasure => treasure.itemId !== treasureId);
         console.log("treasure removed ", treasureId);
         console.log("treasures ", treasures.length);
@@ -1658,6 +1676,12 @@ io.on("connection", (socket) => {
         io.emit("enemy-chasing", data);
     });
     // DISCONNECTIONS
+    // VesselPay's "Send request" - to become a Registered Player (admin/economy.ts; granted on the admin Players tab)
+    safeOn(socket, "registration-request", data => {
+        if (!asSelf(socket, data?.owner, "registration-request"))
+            return;
+        (0, economy_1.requestRegistration)(data.owner).catch(() => { });
+    });
     safeOn(socket, 'will-die', data => {
         // only my own death - it now takes my VesselPay balance with it
         if (!asSelf(socket, data?.ownerId, "will-die"))
@@ -3355,6 +3379,8 @@ function removeCharacter(ownerId, playerName, placeId) {
     },
 });
 // VesselPay (admin/economy.ts): what it tells a player, and how it turns one away
+// how many Legendary / God tier tomes have been found (recources/tomeSupply.ts)
+(0, tomeSupply_1.loadTomeSupply)().catch(() => { });
 (0, economy_1.startEconomy)({
     emitTo: (owner, event, data) => {
         const player = players.find(pl => pl.owner === owner);

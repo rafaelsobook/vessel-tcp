@@ -169,11 +169,36 @@ export function create(app) {
         }
     }
 
+    // ── limited tomes: how many copies of each Legendary / God tier skill book have been found ──
+    const tomeBody = el("tbody")
+    const tomeHead = el("span", { class: "muted" })
+    root.append(el("div", { class: "panel", style: "margin-top:14px" },
+        el("div", { class: "panel-head" }, el("h2", { text: "Limited tomes" }), tomeHead, el("span", { class: "grow" }), button("Refresh", () => loadTomes(), { small: true })),
+        el("div", { class: "hint", text: "Only 10 copies of each Legendary skill book and 3 of each God tier one are ever found in this world. Once a skill's are all found, its chests give a High tome instead." }),
+        el("div", { class: "table-wrap", style: "margin-top:10px" }, el("table", {},
+            el("thead", {}, el("tr", {}, ["Tome", "Rank", "Found", "Left"].map(text => el("th", { text })))),
+            tomeBody))))
+    async function loadTomes() {
+        clear(tomeBody).append(emptyRow(4, "Loading..."))
+        const result = await app.run("tomes.supply", {})
+        clear(tomeBody)
+        if (!result) return tomeBody.append(emptyRow(4, "Couldn't load them"))
+        tomeHead.textContent = result.loaded ? "" : "(the count is still loading from the database)"
+        result.tomes.sort((a, b) => b.rank - a.rank || a.dn.localeCompare(b.dn)).forEach(t => {
+            const left = Math.max(0, t.copies - t.found)
+            tomeBody.append(el("tr", {},
+                el("td", { text: `Tome of ${t.dn}` }),
+                el("td", {}, chip(t.rank === 4 ? "God tier" : "Legendary", t.rank === 4 ? "gold" : "")),
+                el("td", { class: "mono", text: `${t.found} / ${t.copies}` }),
+                el("td", {}, chip(left ? `${left} left` : "all found", left ? (left <= 1 ? "warn" : "good") : "bad"))))
+        })
+    }
+
     show(current)
     return {
         id: "items", title: "Chests & pickups", root,
         onSnapshot(snapshot) { wheres.forEach(where => where.syncPlayers(snapshot)) },
-        onShow() { panels.get(current).refresh() },
+        onShow() { panels.get(current).refresh(); loadTomes() },
         onGoto() { wheres.forEach(where => where.usePick()) },
     }
 }

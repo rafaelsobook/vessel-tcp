@@ -14,6 +14,7 @@ import startingQuests, { createContract, canTakeContract } from "./recources/que
 import { generateSlimes, generateFireSlimes, generateElectricSlimes, generateMonoliths, generateDarkSlimes, generateLesserDemons } from "./generate-datas/genenemy"
 import { startingTreasures, respawnOf } from "./recources/treasures"
 import { claimPickup, releasePickup, releaseClaimsOf } from "./recources/pickupClaims"
+import { loadTomeSupply, reserveChest, confirmChest, releaseChest } from "./recources/tomeSupply"
 import { DUNGEON_TREASURES } from "./recources/treasuresInDungeon"
 import { HIDDEN_TREASURES, HIDDEN_TOMES, HIDDEN_WEAPONS, HIDDEN_MUSHROOMS, hoardWeaponRespawnOf, describeHoards } from "./recources/hiddenHoards"
 import { startingGrains, Tgrain } from "./recources/grains"
@@ -29,7 +30,7 @@ import { createUndeadDirector } from "./recources/undead"
 // the master control's eyes on players (anti-cheat flags, the Watch tab) and the
 // real-money kill payouts (VesselPay) - both decided here, never by a client
 import { watchJoin, watchLeave, watchMove, watchHit, watchEvent, raiseFlag } from "./admin/watch"
-import { startEconomy, verifySession, payKill, onLeave as economyOnLeave, getSettings as economySettings, forfeit as forfeitWallet } from "./admin/economy"
+import { startEconomy, verifySession, payKill, onLeave as economyOnLeave, getSettings as economySettings, forfeit as forfeitWallet, requestRegistration } from "./admin/economy"
 import { faker } from "@faker-js/faker"
 import { isNearCastle } from "./recources/castles"
 import { isNearWitchTower } from "./recources/witchTowers"
@@ -1562,16 +1563,27 @@ io.on("connection", (socket: Socket) => {
         const exists = PICKUP_KINDS[kind]
         if (!exists || !id || !owner) return reply({ ok: false, reason: "unknown" })
         if (!exists(id)) return reply({ ok: false, reason: "gone" })
-        reply(claimPickup(kind, id, owner, ms) ? { ok: true } : { ok: false, reason: "taken" })
+        if (!claimPickup(kind, id, owner, ms)) return reply({ ok: false, reason: "taken" })
+        // a chest with a Legendary / God tier tome: a copy is reserved for them, or swapped if none is left
+        // (recources/tomeSupply.ts) - the answer carries what is really inside then
+        if (kind === "treasure") {
+            const tomes = reserveChest(treasures.find(t => t.itemId === id), ms)
+            if (!tomes.ok) { releasePickup(kind, id, owner); return reply({ ok: false, reason: tomes.reason }) }
+            return reply({ ok: true, contents: tomes.contents, swapped: tomes.swapped })
+        }
+        reply({ ok: true })
     })
     // a client giving up on a pickup before its bar filled (walked off, died)
     safeOn(socket, "releasePickup", data => {
         const { kind, id, owner } = data ?? {}
         if (kind && id) releasePickup(kind, id, owner)
+        if (kind === "treasure" && id) releaseChest(id)
     })
     safeOn(socket, "removeTreasure", treasureId => {
         releasePickup("treasure", treasureId)
         const opened = treasures.find(treasure => treasure.itemId === treasureId)
+        // its limited tomes are found for good (recources/tomeSupply.ts)
+        if (opened) confirmChest(opened)
         treasures = treasures.filter(treasure => treasure.itemId !== treasureId)
         console.log("treasure removed ", treasureId)
         console.log("treasures ", treasures.length)
@@ -1818,6 +1830,11 @@ io.on("connection", (socket: Socket) => {
         io.emit("enemy-chasing", data)
     })
     // DISCONNECTIONS
+    // VesselPay's "Send request" - to become a Registered Player (admin/economy.ts; granted on the admin Players tab)
+    safeOn(socket, "registration-request", data => {
+        if(!asSelf(socket, data?.owner, "registration-request")) return
+        requestRegistration(data.owner).catch(() => {})
+    })
     safeOn(socket, 'will-die', data => {
         // only my own death - it now takes my VesselPay balance with it
         if(!asSelf(socket, data?.ownerId, "will-die")) return
@@ -3543,6 +3560,8 @@ setupAdmin({
 })
 
 // VesselPay (admin/economy.ts): what it tells a player, and how it turns one away
+// how many Legendary / God tier tomes have been found (recources/tomeSupply.ts)
+loadTomeSupply().catch(() => {})
 startEconomy({
     emitTo: (owner, event, data) => {
         const player = players.find(pl => pl.owner === owner)
