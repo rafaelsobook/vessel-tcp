@@ -53,6 +53,7 @@ const genenemy_1 = require("./generate-datas/genenemy");
 const treasures_1 = require("./recources/treasures");
 const pickupClaims_1 = require("./recources/pickupClaims");
 const tomeSupply_1 = require("./recources/tomeSupply");
+const shopBridge_1 = require("./recources/shopBridge");
 const treasuresInDungeon_1 = require("./recources/treasuresInDungeon");
 const hiddenHoards_1 = require("./recources/hiddenHoards");
 const grains_1 = require("./recources/grains");
@@ -168,6 +169,8 @@ app.get("/", (req, res) => {
 app.get("/status", (req, res) => {
     res.status(200).json({ online: players.length });
 });
+// the Vessel Market asks here for the limited Legendary tomes (recources/shopBridge.ts) - key only
+app.use("/internal/shop", shopBridge_1.shopRouter);
 const io = new socket_io_1.Server(server, {
     cors: {
         origin: "*",
@@ -392,8 +395,8 @@ function registerTargetIfNone(enemyId, targetId, dirTarg) {
         return;
     if (enemyTarg._targetId)
         return;
-    // nobody under the guards' protection (safeZones.ts) becomes a target
-    if (isPlayerInSafeZone(targetId))
+    // nobody under the guards' protection (safeZones.ts) becomes a target, nor anyone riding a cart
+    if (isPlayerInSafeZone(targetId) || isInvulnerable(targetId))
         return;
     enemyTarg._targetId = targetId;
     enemyTarg._dirTarg = dirTarg;
@@ -454,6 +457,13 @@ const SAFE_ZONE_SLACK = 6;
 function isPlayerInSafeZone(owner) {
     const pl = players.find(p => p.owner === owner);
     return !!pl && isSafe(pl);
+}
+// IN A CART - see IsInVulnerable on Tplayers. A real player only (bots never ride).
+// Five minutes covers the longest caravan ride, out to the far lands, with room to spare.
+const RIDE_INVULNERABLE_MAX_MS = 5 * 60 * 1000;
+function isInvulnerable(owner) {
+    const pl = players.find(p => p.owner === owner);
+    return !!pl?.IsInVulnerable && Date.now() < (pl.invulnerableUntil ?? 0);
 }
 // the player's own insideSafezone, held only while it's believable: same place, still on that zone's grounds
 function isSafe(pl) {
@@ -542,12 +552,15 @@ function releaseServantsOf(ownerId) {
 const isRealPlayer = (pl) => !!pl && !pl.owner?.startsWith("bot_");
 const undead = (0, undead_1.createUndeadDirector)({
     emit: (event, data) => {
+        // a blow from one of the dead on someone riding a cart doesn't land
+        if (event === "player-is-hit" && isInvulnerable(data?.targetId))
+            return;
         io.emit(event, data);
     },
     getPlayer: owner => players.find(pl => pl.owner === owner && isRealPlayer(pl)),
     // not anyone at the Leadale guard post (safeZones.ts) - the fog's dead
-    // aren't sent after them there
-    openworldPlayers: () => players.filter(pl => isRealPlayer(pl) && pl.currentPlace?.placeId === 888 && pl.pos && !isSafe(pl)),
+    // aren't sent after them there - nor anyone riding a cart
+    openworldPlayers: () => players.filter(pl => isRealPlayer(pl) && pl.currentPlace?.placeId === 888 && pl.pos && !isSafe(pl) && !isInvulnerable(pl.owner)),
     isNight: dayNight_1.isNightTime,
 });
 // duels and parties (recources/pvp.ts) - who is who comes from the live players list
@@ -1092,6 +1105,33 @@ io.on("connection", (socket) => {
         }
         io.emit("skillactivated", data);
     });
+    // A CAST RELEASED - where a player's spell left and which way
+    // (client/src/creations/skillEffects.js's releaseShot): casting while
+    // walking or running, the circle rides along in front of the caster and
+    // the bolt leaves from wherever they are when the cast completes, not
+    // where it began. Only the caster's own client decides what a bolt hits;
+    // everyone else's copy is a picture, so this tells them which line to fly
+    // it on. Purely visual, no server state - socket.broadcast (the caster
+    // already fired theirs). Checked like every other player event: their
+    // own id, and the shape (numbers, a short name) before it goes anywhere.
+    safeOn(socket, "cast-fired", data => {
+        if (!data || !asSelf(socket, data.ownerId, "cast-fired"))
+            return;
+        const num = (v) => typeof v === "number" && Number.isFinite(v);
+        const vec = (v) => v && num(v.x) && num(v.y) && num(v.z) ? { x: v.x, y: v.y, z: v.z } : null;
+        const spawnPos = vec(data.spawnPos);
+        const forward = vec(data.forward);
+        if (typeof data.skillName !== "string" || !spawnPos || !forward)
+            return;
+        socket.broadcast.emit("cast-fired", {
+            ownerId: data.ownerId,
+            skillName: data.skillName.slice(0, 80),
+            shot: num(data.shot) ? Math.max(0, Math.min(64, Math.floor(data.shot))) : 0,
+            currentPlaceId: data.currentPlaceId,
+            spawnPos,
+            forward,
+        });
+    });
     // MAGIC CIRCLES - purely visual sync, no server state to touch. Client is
     // responsible for filtering by placeId (and by ownerId, once emitSpawnCircle
     // sends one - see note in client/src/sockets/emits.js) before spawning.
@@ -1252,6 +1292,9 @@ io.on("connection", (socket) => {
             (0, watch_1.watchEvent)(data.playerId, "pvp", `hit ${victim.name ?? "a player"} for ${Math.round(Number(data.dmgDetails?.weaponDmg || data.dmgDetails?.physicalDmg || 0))}`);
         // party members can't hurt each other (recources/pvp.ts)
         if ((0, pvp_1.isPartyMates)(data?.playerId, data?.targetId))
+            return;
+        // nobody in a cart is hit, and nobody in a cart hits
+        if (isInvulnerable(data?.targetId) || isInvulnerable(data?.playerId))
             return;
         const rawDmg = data.dmgDetails.weaponDmg ? data.dmgDetails.weaponDmg : data.dmgDetails.physicalDmg;
         // a blow on one of the undead (recources/undead.ts) - it takes it from
@@ -1501,8 +1544,8 @@ io.on("connection", (socket) => {
             return io.emit("enemy-removed", data._id);
         }
         // a swing still in flight at someone now under the guards'
-        // protection (safeZones.ts) - dropped, and it doesn't re-take them
-        if (isPlayerInSafeZone(data.targetId))
+        // protection (safeZones.ts), or riding a cart - dropped, and it doesn't re-take them
+        if (isPlayerInSafeZone(data.targetId) || isInvulnerable(data.targetId))
             return;
         tcpEnemies.forEach(enem => {
             if (data._id === enem._id) {
@@ -1586,6 +1629,9 @@ io.on("connection", (socket) => {
         const exist = tcpEnemies.find(enem => enem._id === data._id);
         if (!exist || exist.hp <= 0)
             return io.emit("enemy-removed", data._id);
+        // nothing is cast at someone riding a cart
+        if (isInvulnerable(data.targetId))
+            return;
         tcpEnemies.forEach(enem => {
             if (data._id === enem._id) {
                 enem._targetId = data.targetId;
@@ -1609,6 +1655,9 @@ io.on("connection", (socket) => {
         if (!enem || enem.hp <= 0)
             return io.emit("enemy-removed", data._id);
         if (!enem.rangeAtkDetails)
+            return;
+        // no bolt or fireball reaches someone riding a cart
+        if (isInvulnerable(data.targetId))
             return;
         const now = Date.now();
         if (enem._rangeAtkCooldownUntil && now < enem._rangeAtkCooldownUntil)
@@ -1657,6 +1706,25 @@ io.on("connection", (socket) => {
         const player = players.find(user => user.owner === data?.ownerId);
         if (player)
             player.insideSafezone = null;
+    });
+    // climbed into a cart / got down from it (client assetcreation/summonwagon.js's ride) -
+    // see IsInVulnerable on Tplayers. Getting in lets go of whatever was after them
+    safeOn(socket, "riding-wagon", data => {
+        if (!asSelf(socket, data?.ownerId, "riding-wagon"))
+            return;
+        const player = players.find(user => user.owner === data.ownerId);
+        if (!player)
+            return;
+        if (data.riding) {
+            player.IsInVulnerable = true;
+            player.invulnerableUntil = Date.now() + RIDE_INVULNERABLE_MAX_MS;
+            releaseEnemiesTargeting(player.owner);
+            undead.onPlayerGone(player.owner, "left");
+        }
+        else {
+            player.IsInVulnerable = false;
+            player.invulnerableUntil = 0;
+        }
     });
     safeOn(socket, "enemyWillChase", data => {
         const { currentPlaceId, _id, targetId, actionType } = data;
@@ -2945,6 +3013,9 @@ function spawnBot(overrides) {
         // damage - their own client applies it on receiving this, exactly
         // the way it already does for a hit from another player.
         dealDamageToPlayer: (targetOwnerId, dmgDetails) => {
+            // riding a cart - out of reach
+            if (isInvulnerable(targetOwnerId))
+                return;
             const victim = players.find(pl => pl.owner === targetOwnerId);
             performBotAttack(targetOwnerId, dmgDetails, victim ? { x: victim.pos.x, z: victim.pos.z } : null, () => {
                 // the victim being ANOTHER BOT cannot arise from retaliation
@@ -3217,8 +3288,8 @@ setInterval(() => {
         const prey = players.find(pl => pl.owner === owner);
         const stillOn = wolf && wolf._targetId === owner
             && prey?.pos && prey.currentPlace?.placeId === 888 && distFromStart(prey.pos) >= HUNT_GIVE_UP_DIST
-            // safe inside a castle's walls (or at the guard post) - the hunt is called off
-            && !isPlayerInSafeZone(owner);
+            // safe inside a castle's walls (or at the guard post), or riding a cart - the hunt is called off
+            && !isPlayerInSafeZone(owner) && !isInvulnerable(owner);
         if (stillOn)
             return;
         hunts.delete(wolfName);
@@ -3233,7 +3304,7 @@ setInterval(() => {
             return;
         if (distFromStart(pl.pos) < HUNT_START_DIST)
             return;
-        if (isPlayerInSafeZone(pl.owner))
+        if (isPlayerInSafeZone(pl.owner) || isInvulnerable(pl.owner))
             return;
         if ([...hunts.values()].includes(pl.owner))
             return;

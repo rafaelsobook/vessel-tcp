@@ -21,6 +21,9 @@ const RANK = new Map<string, number>(TOME_SKILLS.map(([name, , rank]) => [name, 
 const capOf = (item: any): number | undefined => item?.itemCateg === "skillbook" ? TOME_COPIES[RANK.get(item.skillName) ?? 0] : undefined
 
 let counts: Record<string, number> = {}
+// Market orders (the REST server's routes/shopR.js) whose copy was taken, newest last - kept with the count so a
+// retry after a restart can't take a second copy for the same order
+let shopOrders: string[] = []
 let loaded = false
 const left = (skill: string) => {
     const cap = TOME_COPIES[RANK.get(skill) ?? 0]
@@ -39,6 +42,7 @@ export async function loadTomeSupply() {
             // copies counted meanwhile (none can be, while it isn't loaded - but just in case) stay on top
             const saved = res?.counts ?? {}
             for (const [skill, n] of Object.entries(saved)) counts[skill] = Math.max(counts[skill] ?? 0, Number(n) || 0)
+            shopOrders = [...new Set([...(Array.isArray(res?.shopOrders) ? res.shopOrders : []), ...shopOrders])].slice(-2000)
             loaded = true
             console.log(`[tomes] limited copies found so far: ${Object.entries(counts).map(([s, n]) => `${s} ${n}`).join(", ") || "none"}`)
             return
@@ -54,7 +58,7 @@ function save() {
     clearTimeout(saveTimer)
     saveTimer = setTimeout(async () => {
         try {
-            await requestRest("PUT", `/admin/tomes/${encodeURIComponent(worldName())}`, { counts })
+            await requestRest("PUT", `/admin/tomes/${encodeURIComponent(worldName())}`, { counts, shopOrders })
         } catch (error: any) {
             console.warn(`[tomes] couldn't save the copies found (${error?.message}) - trying again`)
             save()
@@ -121,4 +125,40 @@ export function tomeSupplyStatus() {
         loaded,
         tomes: TOME_SKILLS.filter(([, , rank]) => TOME_COPIES[rank]).map(([name, dn, rank]) => ({ name, dn, rank, found: counts[name] ?? 0, copies: TOME_COPIES[rank] })),
     }
+}
+
+// ── the Vessel Market ──────────────────────────────────────────────────────────
+// The market (server routes/shopR.js, client/src/shop/) sells High and Legendary tomes for real money. A
+// Legendary one is a copy from THIS pool, so a bought one counts exactly like a found one. The REST server asks
+// after it has the money: take a copy (shopSell), and give it back if the order then fails (shopRelease).
+
+/** How many copies of each limited skill are left, for the market's shelf. null while the count isn't loaded. */
+export function shopLeft(skills: string[]): Record<string, number> | null {
+    if (!loaded) return null
+    const out: Record<string, number> = {}
+    skills.forEach(skill => { if (TOME_COPIES[RANK.get(skill) ?? 0]) out[skill] = Math.max(0, left(skill)) })
+    return out
+}
+
+/** Takes one copy of a Legendary skill for a market order. Asking twice for the same order takes one copy. */
+export function shopSell(skill: string, orderId: string): { ok: boolean, reason?: string } {
+    if (!TOME_COPIES[RANK.get(skill) ?? 0]) return { ok: false, reason: "notlimited" }
+    if (!loaded) return { ok: false, reason: "busy" }
+    if (shopOrders.includes(orderId)) return { ok: true }
+    if (left(skill) <= 0) return { ok: false, reason: "soldout" }
+    counts[skill] = (counts[skill] ?? 0) + 1
+    shopOrders.push(orderId)
+    if (shopOrders.length > 2000) shopOrders.shift()
+    save()
+    return { ok: true }
+}
+
+/** The order failed after its copy was taken (a refund): the copy goes back. Safe to repeat. */
+export function shopRelease(skill: string, orderId: string): { ok: boolean } {
+    const at = shopOrders.indexOf(orderId)
+    if (at < 0) return { ok: true }
+    shopOrders.splice(at, 1)
+    counts[skill] = Math.max(0, (counts[skill] ?? 0) - 1)
+    save()
+    return { ok: true }
 }

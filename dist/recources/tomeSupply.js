@@ -6,6 +6,9 @@ exports.reserveChest = reserveChest;
 exports.confirmChest = confirmChest;
 exports.releaseChest = releaseChest;
 exports.tomeSupplyStatus = tomeSupplyStatus;
+exports.shopLeft = shopLeft;
+exports.shopSell = shopSell;
+exports.shopRelease = shopRelease;
 const persistence_1 = require("../admin/persistence");
 const skillTomes_1 = require("./skillTomes");
 // LIMITED TOMES (the user, 2026-11-18): only so many copies of each Legendary and God tier skill book
@@ -26,6 +29,9 @@ exports.TOME_COPIES = { 3: 10, 4: 3 };
 const RANK = new Map(skillTomes_1.TOME_SKILLS.map(([name, , rank]) => [name, rank]));
 const capOf = (item) => item?.itemCateg === "skillbook" ? exports.TOME_COPIES[RANK.get(item.skillName) ?? 0] : undefined;
 let counts = {};
+// Market orders (the REST server's routes/shopR.js) whose copy was taken, newest last - kept with the count so a
+// retry after a restart can't take a second copy for the same order
+let shopOrders = [];
 let loaded = false;
 const left = (skill) => {
     const cap = exports.TOME_COPIES[RANK.get(skill) ?? 0];
@@ -48,6 +54,7 @@ async function loadTomeSupply() {
             const saved = res?.counts ?? {};
             for (const [skill, n] of Object.entries(saved))
                 counts[skill] = Math.max(counts[skill] ?? 0, Number(n) || 0);
+            shopOrders = [...new Set([...(Array.isArray(res?.shopOrders) ? res.shopOrders : []), ...shopOrders])].slice(-2000);
             loaded = true;
             console.log(`[tomes] limited copies found so far: ${Object.entries(counts).map(([s, n]) => `${s} ${n}`).join(", ") || "none"}`);
             return;
@@ -64,7 +71,7 @@ function save() {
     clearTimeout(saveTimer);
     saveTimer = setTimeout(async () => {
         try {
-            await (0, persistence_1.requestRest)("PUT", `/admin/tomes/${encodeURIComponent((0, persistence_1.worldName)())}`, { counts });
+            await (0, persistence_1.requestRest)("PUT", `/admin/tomes/${encodeURIComponent((0, persistence_1.worldName)())}`, { counts, shopOrders });
         }
         catch (error) {
             console.warn(`[tomes] couldn't save the copies found (${error?.message}) - trying again`);
@@ -138,4 +145,44 @@ function tomeSupplyStatus() {
         loaded,
         tomes: skillTomes_1.TOME_SKILLS.filter(([, , rank]) => exports.TOME_COPIES[rank]).map(([name, dn, rank]) => ({ name, dn, rank, found: counts[name] ?? 0, copies: exports.TOME_COPIES[rank] })),
     };
+}
+// ── the Vessel Market ──────────────────────────────────────────────────────────
+// The market (server routes/shopR.js, client/src/shop/) sells High and Legendary tomes for real money. A
+// Legendary one is a copy from THIS pool, so a bought one counts exactly like a found one. The REST server asks
+// after it has the money: take a copy (shopSell), and give it back if the order then fails (shopRelease).
+/** How many copies of each limited skill are left, for the market's shelf. null while the count isn't loaded. */
+function shopLeft(skills) {
+    if (!loaded)
+        return null;
+    const out = {};
+    skills.forEach(skill => { if (exports.TOME_COPIES[RANK.get(skill) ?? 0])
+        out[skill] = Math.max(0, left(skill)); });
+    return out;
+}
+/** Takes one copy of a Legendary skill for a market order. Asking twice for the same order takes one copy. */
+function shopSell(skill, orderId) {
+    if (!exports.TOME_COPIES[RANK.get(skill) ?? 0])
+        return { ok: false, reason: "notlimited" };
+    if (!loaded)
+        return { ok: false, reason: "busy" };
+    if (shopOrders.includes(orderId))
+        return { ok: true };
+    if (left(skill) <= 0)
+        return { ok: false, reason: "soldout" };
+    counts[skill] = (counts[skill] ?? 0) + 1;
+    shopOrders.push(orderId);
+    if (shopOrders.length > 2000)
+        shopOrders.shift();
+    save();
+    return { ok: true };
+}
+/** The order failed after its copy was taken (a refund): the copy goes back. Safe to repeat. */
+function shopRelease(skill, orderId) {
+    const at = shopOrders.indexOf(orderId);
+    if (at < 0)
+        return { ok: true };
+    shopOrders.splice(at, 1);
+    counts[skill] = Math.max(0, (counts[skill] ?? 0) - 1);
+    save();
+    return { ok: true };
 }
